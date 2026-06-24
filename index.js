@@ -18,6 +18,7 @@ const fetch = require('node-fetch');
 // ──────────────────────────────────────────────
 const TOKEN            = process.env.TOKEN;
 const CLIENT_ID        = process.env.CLIENT_ID || '1519233968749416498';
+const GUILD_ID         = process.env.GUILD_ID  || '1515771169138147448';
 const RENDER_URL       = process.env.RENDER_EXTERNAL_URL;
 
 const OWNER_IDS_DEFAULT = ['207283656203436042', '685679698054742017'];
@@ -314,7 +315,7 @@ async function registerCommands() {
   const rest = new REST({ version: '10' }).setToken(TOKEN);
   try {
     console.log('📡 Enregistrement des commandes slash...');
-    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
     console.log('✅ Commandes enregistrées.');
   } catch (e) {
     console.error('❌ Erreur enregistrement commandes:', e);

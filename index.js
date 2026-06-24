@@ -1,0 +1,1182 @@
+// ============================================================
+//  🌸 BOT MAYSSA — Ticket + Protection — index.js
+//  Render ready: keepalive Express + self-ping toutes les 2min
+// ============================================================
+
+const {
+  Client, GatewayIntentBits, Partials, Collection,
+  EmbedBuilder, ActionRowBuilder, StringSelectMenuBuilder,
+  ButtonBuilder, ButtonStyle, PermissionFlagsBits,
+  ChannelType, REST, Routes, SlashCommandBuilder,
+  Events, AuditLogEvent, time
+} = require('discord.js');
+const express = require('express');
+const fetch = require('node-fetch');
+
+// ──────────────────────────────────────────────
+//  CONFIG — Variables d'environnement Render
+// ──────────────────────────────────────────────
+const TOKEN            = process.env.TOKEN;
+const CLIENT_ID        = process.env.CLIENT_ID;
+const RENDER_URL       = process.env.RENDER_EXTERNAL_URL;
+
+const OWNER_IDS_DEFAULT = ['207283656203436042', '685679698054742017'];
+
+// ──────────────────────────────────────────────
+//  STATE en mémoire (persist via redémarrage
+//  grâce aux variables ci-dessous)
+// ──────────────────────────────────────────────
+// Toutes les données par guild
+const guildData = {};
+
+function getGuild(guildId) {
+  if (!guildData[guildId]) {
+    guildData[guildId] = {
+      // Owners bot
+      ownerIds: [...OWNER_IDS_DEFAULT],
+
+      // Ticket panel config
+      panel: {
+        title: '🦋 • SUPPORT TICKET • 🦋',
+        description: '♡ ••••• ♡\n\n*• Tu as envie de commander une prestation de Mayssa ? Une question ? Ou autre ?*\n\n💋 **Ouvre un ticket parmis les options suivantes :**',
+        selections: [
+          { id: 'prestations', label: '• PRESTATIONS • 💋', description: 'Commande mes services ici !',       pingRoleId: null, categoryId: null },
+          { id: 'questions',   label: '• QUESTIONS • 💋',   description: 'Des questions / demandes ?',        pingRoleId: null, categoryId: null },
+          { id: 'partenariat', label: '• PARTENARIAT • 💋', description: 'Tu souhaites faire un partenariat avec Mayssa ?', pingRoleId: null, categoryId: null },
+          { id: 'reports',     label: '• REPORTS • 💋',     description: 'Un abus / fake à rapporté ?',       pingRoleId: null, categoryId: null },
+          { id: 'autres',      label: '• AUTRES • 💋',      description: 'Aborde un autre sujet ici !',       pingRoleId: null, categoryId: null },
+        ],
+      },
+
+      // Tickets ouverts : channelId -> { userId, claimedBy, selectionId }
+      tickets: {},
+
+      // Logs channels
+      logsChannels: {
+        tickets:    null,
+        antiraid:   null,
+        antispam:   null,
+        antibot:    null,
+        protection: null,
+        sanctions:  null,
+        advanced:   null,
+        security:   null,
+      },
+
+      // Manager roles (peuvent /close /delete /add /remove)
+      managerRoles: [],
+
+      // Anti-raid & spam
+      antiRaid: {
+        enabled: false,
+        joinTimestamps: [],       // timestamps des joins récents
+        quarantinedUsers: [],
+        locked: false,
+      },
+
+      // Anti-lien
+      antiLink: {
+        enabled: false,
+        fullBypassRoles: [],      // bypass total liens
+        gifOnlyBypassRoles: [],   // bypass gif uniquement
+      },
+
+      // Anti-spam
+      antiSpam: {
+        userMessages: {},         // userId -> [timestamps]
+      },
+
+      // Whitelist sécurité
+      whitelist: [],
+
+      // Règlement
+      rules: [],  // { messageId, channelId, roleId }
+
+      // Lockdown
+      lockdown: false,
+      maintenance: false,
+
+      // Sauvegarde channels (pour restauration)
+      channelBackup: {},
+    };
+  }
+  return guildData[guildId];
+}
+
+// ──────────────────────────────────────────────
+//  CLIENT DISCORD
+// ──────────────────────────────────────────────
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMessageReactions,
+    GatewayIntentBits.GuildModeration,
+  ],
+  partials: [Partials.Message, Partials.Reaction, Partials.Channel],
+});
+
+// ──────────────────────────────────────────────
+//  HELPERS
+// ──────────────────────────────────────────────
+function isOwner(guildId, userId) {
+  return getGuild(guildId).ownerIds.includes(userId);
+}
+
+function isManager(guildId, member) {
+  if (isOwner(guildId, member.id)) return true;
+  const d = getGuild(guildId);
+  return d.managerRoles.some(rId => member.roles.cache.has(rId));
+}
+
+function canClaimTicket(guildId, member, selectionId) {
+  if (isOwner(guildId, member.id)) return true;
+  const d = getGuild(guildId);
+  const sel = d.panel.selections.find(s => s.id === selectionId);
+  if (!sel || !sel.pingRoleId) return isManager(guildId, member);
+  // Le rôle pingé ou plus haut dans la hiérarchie
+  const pingRole = member.guild.roles.cache.get(sel.pingRoleId);
+  if (!pingRole) return isManager(guildId, member);
+  return member.roles.cache.some(r => r.position >= pingRole.position);
+}
+
+async function sendLog(guild, logKey, embed) {
+  try {
+    const d = getGuild(guild.id);
+    const chId = d.logsChannels[logKey];
+    if (!chId) return;
+    const ch = guild.channels.cache.get(chId);
+    if (ch) await ch.send({ embeds: [embed] });
+  } catch {}
+}
+
+async function ensureLogCategory(guild) {
+  const d = getGuild(guild.id);
+  const LOG_CHANNELS = [
+    { key: 'tickets',    name: '🎫・logs-tickets'    },
+    { key: 'antiraid',   name: '🛡️・logs-antiraid'   },
+    { key: 'antispam',   name: '🚫・logs-antispam'   },
+    { key: 'antibot',    name: '🤖・logs-antibot'    },
+    { key: 'protection', name: '🔨・logs-protection' },
+    { key: 'sanctions',  name: '👮・logs-sanctions'  },
+    { key: 'advanced',   name: '📜・logs-avancés'    },
+    { key: 'security',   name: '⚙️・logs-sécurité'   },
+  ];
+
+  // Cherche ou crée la catégorie
+  let cat = guild.channels.cache.find(c => c.type === ChannelType.GuildCategory && c.name === '📋 LOGS BOT');
+  if (!cat) {
+    cat = await guild.channels.create({
+      name: '📋 LOGS BOT',
+      type: ChannelType.GuildCategory,
+      permissionOverwrites: [
+        { id: guild.roles.everyone, deny: [PermissionFlagsBits.ViewChannel] },
+      ],
+    });
+  }
+
+  for (const { key, name } of LOG_CHANNELS) {
+    if (d.logsChannels[key]) {
+      const existing = guild.channels.cache.get(d.logsChannels[key]);
+      if (existing) continue; // existe déjà, pas de doublon
+    }
+    // Cherche par nom dans la catégorie
+    const existing = guild.channels.cache.find(c => c.name === name && c.parentId === cat.id);
+    if (existing) {
+      d.logsChannels[key] = existing.id;
+      continue;
+    }
+    const ch = await guild.channels.create({
+      name,
+      type: ChannelType.GuildText,
+      parent: cat.id,
+      permissionOverwrites: [
+        { id: guild.roles.everyone, deny: [PermissionFlagsBits.ViewChannel] },
+      ],
+    });
+    d.logsChannels[key] = ch.id;
+  }
+}
+
+// ──────────────────────────────────────────────
+//  BUILD TICKET PANEL EMBED + SELECT MENU
+// ──────────────────────────────────────────────
+function buildPanelComponents(guildId) {
+  const d = getGuild(guildId);
+  const embed = new EmbedBuilder()
+    .setTitle(d.panel.title)
+    .setDescription(d.panel.description)
+    .setColor(0x2b0a2b)
+    .setFooter({ text: 'Mayssa • Call me Mayssa 💋' });
+
+  const options = d.panel.selections.map(s => ({
+    label: s.label,
+    description: s.description,
+    value: s.id,
+    emoji: '💋',
+  }));
+
+  const row = new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId('ticket_open')
+      .setPlaceholder('💋 Sélectionne une raison...')
+      .addOptions(options)
+  );
+
+  return { embed, row };
+}
+
+// ──────────────────────────────────────────────
+//  SLASH COMMANDS DEFINITIONS
+// ──────────────────────────────────────────────
+const commands = [
+  // ── OWNER ──
+  new SlashCommandBuilder().setName('addown').setDescription('Ajouter un owner bot')
+    .addUserOption(o => o.setName('user').setDescription('Utilisateur').setRequired(true)),
+  new SlashCommandBuilder().setName('delown').setDescription('Retirer un owner bot')
+    .addUserOption(o => o.setName('user').setDescription('Utilisateur').setRequired(true)),
+  new SlashCommandBuilder().setName('ownlist').setDescription('Liste des owners bot'),
+
+  // ── PANEL ──
+  new SlashCommandBuilder().setName('paneltitle').setDescription('Modifier le titre du panel ticket')
+    .addStringOption(o => o.setName('titre').setDescription('Nouveau titre').setRequired(true)),
+  new SlashCommandBuilder().setName('paneldescription').setDescription('Modifier la description du panel')
+    .addStringOption(o => o.setName('desc').setDescription('Nouvelle description').setRequired(true)),
+  new SlashCommandBuilder().setName('panelselection').setDescription('Ajouter une option au panel ticket')
+    .addStringOption(o => o.setName('id').setDescription('ID unique (ex: vip)').setRequired(true))
+    .addStringOption(o => o.setName('label').setDescription('Label affiché').setRequired(true))
+    .addStringOption(o => o.setName('description').setDescription('Description').setRequired(true)),
+  new SlashCommandBuilder().setName('paneldelselection').setDescription('Retirer une option du panel')
+    .addStringOption(o => o.setName('id').setDescription('ID de la sélection').setRequired(true)),
+  new SlashCommandBuilder().setName('panelsetpingrole').setDescription('Définir le rôle pingé pour une raison')
+    .addStringOption(o => o.setName('id').setDescription('ID de la sélection').setRequired(true))
+    .addRoleOption(o => o.setName('role').setDescription('Rôle à pinger').setRequired(true)),
+  new SlashCommandBuilder().setName('panelsetcategory').setDescription('Définir la catégorie pour une raison')
+    .addStringOption(o => o.setName('id').setDescription('ID de la sélection').setRequired(true))
+    .addChannelOption(o => o.setName('categorie').setDescription('Catégorie').setRequired(true)),
+  new SlashCommandBuilder().setName('panel').setDescription('Envoyer le panel ticket dans ce salon'),
+
+  // ── TICKET ──
+  new SlashCommandBuilder().setName('add').setDescription('Ajouter un membre au ticket')
+    .addUserOption(o => o.setName('user').setDescription('Membre').setRequired(true)),
+  new SlashCommandBuilder().setName('remove').setDescription('Retirer un membre du ticket')
+    .addUserOption(o => o.setName('user').setDescription('Membre').setRequired(true)),
+  new SlashCommandBuilder().setName('close').setDescription('Fermer le ticket (compte à rebours 5s)'),
+  new SlashCommandBuilder().setName('delete').setDescription('Supprimer immédiatement le ticket'),
+  new SlashCommandBuilder().setName('rename').setDescription('Renommer le ticket')
+    .addStringOption(o => o.setName('nom').setDescription('Nouveau nom').setRequired(true)),
+
+  // ── SETUP ──
+  new SlashCommandBuilder().setName('addmanagerole').setDescription('Autoriser un rôle à gérer les tickets')
+    .addRoleOption(o => o.setName('role').setDescription('Rôle').setRequired(true)),
+  new SlashCommandBuilder().setName('removemanagerole').setDescription('Retirer un rôle manager')
+    .addRoleOption(o => o.setName('role').setDescription('Rôle').setRequired(true)),
+  new SlashCommandBuilder().setName('listmanageroles').setDescription('Liste des rôles managers'),
+  new SlashCommandBuilder().setName('setlogschannel').setDescription('Définir manuellement un salon de logs')
+    .addStringOption(o => o.setName('type').setDescription('Type (tickets/antiraid/antispam/antibot/protection/sanctions/advanced/security)').setRequired(true))
+    .addChannelOption(o => o.setName('salon').setDescription('Salon').setRequired(true)),
+  new SlashCommandBuilder().setName('setuplogs').setDescription('Créer automatiquement tous les salons de logs'),
+
+  // ── ANTI-RAID / PROTECTION ──
+  new SlashCommandBuilder().setName('antiraid').setDescription('Activer/Désactiver la protection anti-raid')
+    .addStringOption(o => o.setName('action').setDescription('on / off').setRequired(true)
+      .addChoices({ name: 'Activer', value: 'on' }, { name: 'Désactiver', value: 'off' })),
+  new SlashCommandBuilder().setName('antilink').setDescription('Activer/Désactiver l\'anti-lien')
+    .addStringOption(o => o.setName('action').setDescription('on / off').setRequired(true)
+      .addChoices({ name: 'Activer', value: 'on' }, { name: 'Désactiver', value: 'off' })),
+  new SlashCommandBuilder().setName('setbypassrole').setDescription('Rôle bypass total des liens')
+    .addRoleOption(o => o.setName('role').setDescription('Rôle').setRequired(true)),
+  new SlashCommandBuilder().setName('setgifonlyrole').setDescription('Rôle bypass gif uniquement (pas de liens ext.)')
+    .addRoleOption(o => o.setName('role').setDescription('Rôle').setRequired(true)),
+  new SlashCommandBuilder().setName('lockdown').setDescription('Mode urgence : verrouille tous les salons')
+    .addStringOption(o => o.setName('action').setDescription('on / off').setRequired(true)
+      .addChoices({ name: 'Activer', value: 'on' }, { name: 'Désactiver', value: 'off' })),
+  new SlashCommandBuilder().setName('maintenance').setDescription('Mode maintenance')
+    .addStringOption(o => o.setName('action').setDescription('on / off').setRequired(true)
+      .addChoices({ name: 'Activer', value: 'on' }, { name: 'Désactiver', value: 'off' })),
+  new SlashCommandBuilder().setName('whitelist').setDescription('Gérer la whitelist admin')
+    .addStringOption(o => o.setName('action').setDescription('add / remove / list').setRequired(true)
+      .addChoices({ name: 'Ajouter', value: 'add' }, { name: 'Retirer', value: 'remove' }, { name: 'Liste', value: 'list' }))
+    .addUserOption(o => o.setName('user').setDescription('Utilisateur')),
+
+  // ── RÈGLEMENT ──
+  new SlashCommandBuilder().setName('rule').setDescription('Envoyer le règlement avec réaction rôle')
+    .addStringOption(o => o.setName('message').setDescription('Texte du règlement').setRequired(true))
+    .addRoleOption(o => o.setName('role').setDescription('Rôle attribué après validation').setRequired(true)),
+].map(c => c.toJSON());
+
+// ──────────────────────────────────────────────
+//  REGISTER SLASH COMMANDS
+// ──────────────────────────────────────────────
+async function registerCommands() {
+  const rest = new REST({ version: '10' }).setToken(TOKEN);
+  try {
+    console.log('📡 Enregistrement des commandes slash...');
+    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+    console.log('✅ Commandes enregistrées.');
+  } catch (e) {
+    console.error('❌ Erreur enregistrement commandes:', e);
+  }
+}
+
+// ══════════════════════════════════════════════
+//  EVENT: READY
+// ══════════════════════════════════════════════
+client.once(Events.ClientReady, async () => {
+  console.log(`✅ Connecté en tant que ${client.user.tag}`);
+  client.user.setPresence({ activities: [{ name: '💋 Mayssa • Call me Mayssa' }], status: 'dnd' });
+  await registerCommands();
+
+  // Initialiser les logs pour chaque guild
+  for (const guild of client.guilds.cache.values()) {
+    try { await ensureLogCategory(guild); } catch {}
+  }
+});
+
+client.on(Events.GuildCreate, async guild => {
+  try { await ensureLogCategory(guild); } catch {}
+});
+
+// ══════════════════════════════════════════════
+//  EVENT: INTERACTION (Slash + Select + Button)
+// ══════════════════════════════════════════════
+client.on(Events.InteractionCreate, async interaction => {
+  const gId = interaction.guildId;
+  if (!gId) return;
+  const d = getGuild(gId);
+
+  // ── SELECT MENU : ouverture ticket ──────────
+  if (interaction.isStringSelectMenu() && interaction.customId === 'ticket_open') {
+    await interaction.deferReply({ ephemeral: true });
+    const selId = interaction.values[0];
+    const sel = d.panel.selections.find(s => s.id === selId);
+    if (!sel) return interaction.editReply({ content: '❌ Option introuvable.' });
+
+    // Vérif si ticket déjà ouvert par cet user
+    const existing = Object.entries(d.tickets).find(([, t]) => t.userId === interaction.user.id);
+    if (existing) {
+      const ch = interaction.guild.channels.cache.get(existing[0]);
+      return interaction.editReply({ content: `❌ Tu as déjà un ticket ouvert : ${ch ? ch.toString() : '#ticket-supprimé'}` });
+    }
+
+    // Catégorie du ticket
+    let parentId = sel.categoryId || null;
+
+    // Création du channel
+    const ticketName = `💋・${selId}-${interaction.user.username}`.slice(0, 100);
+    const overwrites = [
+      { id: interaction.guild.roles.everyone, deny: [PermissionFlagsBits.ViewChannel] },
+      { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+    ];
+    if (sel.pingRoleId) {
+      overwrites.push({ id: sel.pingRoleId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] });
+    }
+
+    let ticketChannel;
+    try {
+      ticketChannel = await interaction.guild.channels.create({
+        name: ticketName,
+        type: ChannelType.GuildText,
+        parent: parentId,
+        permissionOverwrites: overwrites,
+      });
+    } catch (e) {
+      return interaction.editReply({ content: '❌ Impossible de créer le ticket. Vérifie les permissions du bot.' });
+    }
+
+    d.tickets[ticketChannel.id] = { userId: interaction.user.id, claimedBy: null, selectionId: selId };
+
+    // Embed d'accueil
+    const embed = new EmbedBuilder()
+      .setTitle(`💋 Ticket — ${sel.label}`)
+      .setDescription(`Bienvenue ${interaction.user} !\n\n*${sel.description}*\n\nUn membre de l'équipe va te répondre bientôt. 💋`)
+      .setColor(0x2b0a2b)
+      .setFooter({ text: 'Mayssa • Call me Mayssa 💋' })
+      .setTimestamp();
+
+    const claimRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('ticket_claim').setLabel('✅ Claim').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('ticket_close').setLabel('🔒 Fermer').setStyle(ButtonStyle.Danger),
+    );
+
+    let pingMsg = '';
+    if (sel.pingRoleId) pingMsg = `<@&${sel.pingRoleId}>`;
+
+    await ticketChannel.send({ content: pingMsg, embeds: [embed], components: [claimRow] });
+    await interaction.editReply({ content: `✅ Ton ticket a été ouvert : ${ticketChannel}` });
+
+    // Log
+    const logEmbed = new EmbedBuilder()
+      .setTitle('🎫 Nouveau Ticket Ouvert')
+      .setDescription(`**Utilisateur :** ${interaction.user} (${interaction.user.id})\n**Raison :** ${sel.label}\n**Salon :** ${ticketChannel}`)
+      .setColor(0x00ff99).setTimestamp();
+    await sendLog(interaction.guild, 'tickets', logEmbed);
+    return;
+  }
+
+  // ── BOUTONS TICKET ──────────────────────────
+  if (interaction.isButton()) {
+    const cId = interaction.customId;
+
+    // CLAIM
+    if (cId === 'ticket_claim' || cId === 'ticket_unclaim') {
+      const ticket = d.tickets[interaction.channelId];
+      if (!ticket) return interaction.reply({ content: '❌ Ce salon n\'est pas un ticket.', ephemeral: true });
+
+      if (!canClaimTicket(gId, interaction.member, ticket.selectionId)) {
+        return interaction.reply({ content: '❌ Tu n\'as pas la permission de claim ce ticket.', ephemeral: true });
+      }
+
+      if (cId === 'ticket_claim') {
+        ticket.claimedBy = interaction.user.id;
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('ticket_unclaim').setLabel('↩️ Unclaim').setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId('ticket_close').setLabel('🔒 Fermer').setStyle(ButtonStyle.Danger),
+        );
+        await interaction.update({ components: [row] });
+        await interaction.channel.send({ content: `✅ **${interaction.user}** a claim ce ticket.` });
+      } else {
+        ticket.claimedBy = null;
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('ticket_claim').setLabel('✅ Claim').setStyle(ButtonStyle.Success),
+          new ButtonBuilder().setCustomId('ticket_close').setLabel('🔒 Fermer').setStyle(ButtonStyle.Danger),
+        );
+        await interaction.update({ components: [row] });
+        await interaction.channel.send({ content: `↩️ **${interaction.user}** a unclaim ce ticket.` });
+      }
+      return;
+    }
+
+    // CLOSE (bouton)
+    if (cId === 'ticket_close') {
+      const ticket = d.tickets[interaction.channelId];
+      if (!ticket) return interaction.reply({ content: '❌ Ce salon n\'est pas un ticket.', ephemeral: true });
+      if (!isManager(gId, interaction.member)) {
+        return interaction.reply({ content: '❌ Permission insuffisante.', ephemeral: true });
+      }
+      await interaction.reply({ content: '🔒 Fermeture du ticket dans **5**...' });
+      for (let i = 4; i >= 0; i--) {
+        await new Promise(r => setTimeout(r, 1000));
+        try { await interaction.channel.send({ content: `🔒 **${i}**...` }); } catch {}
+      }
+      await new Promise(r => setTimeout(r, 1000));
+      try {
+        const logEmbed = new EmbedBuilder()
+          .setTitle('🔒 Ticket Fermé')
+          .setDescription(`**Salon :** ${interaction.channel.name}\n**Fermé par :** ${interaction.user}`)
+          .setColor(0xff4444).setTimestamp();
+        await sendLog(interaction.guild, 'tickets', logEmbed);
+        delete d.tickets[interaction.channelId];
+        await interaction.channel.delete();
+      } catch {}
+      return;
+    }
+
+    // RULE ACCEPT
+    if (cId.startsWith('rule_accept_')) {
+      const roleId = cId.replace('rule_accept_', '');
+      try {
+        await interaction.member.roles.add(roleId);
+        await interaction.reply({ content: '✅ Tu as accepté le règlement et obtenu ton rôle !', ephemeral: true });
+      } catch {
+        await interaction.reply({ content: '❌ Impossible d\'attribuer le rôle.', ephemeral: true });
+      }
+      return;
+    }
+  }
+
+  // ── SLASH COMMANDS ──────────────────────────
+  if (!interaction.isChatInputCommand()) return;
+  const { commandName } = interaction;
+
+  // ════ OWNER COMMANDS ════
+  if (commandName === 'addown') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+    const user = interaction.options.getUser('user');
+    if (d.ownerIds.includes(user.id)) return interaction.reply({ content: '⚠️ Déjà owner.', ephemeral: true });
+    d.ownerIds.push(user.id);
+    return interaction.reply({ content: `✅ ${user} ajouté comme owner bot.`, ephemeral: true });
+  }
+
+  if (commandName === 'delown') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+    const user = interaction.options.getUser('user');
+    if (OWNER_IDS_DEFAULT.includes(user.id)) return interaction.reply({ content: '❌ Impossible de retirer un owner par défaut.', ephemeral: true });
+    d.ownerIds = d.ownerIds.filter(id => id !== user.id);
+    return interaction.reply({ content: `✅ ${user} retiré des owners.`, ephemeral: true });
+  }
+
+  if (commandName === 'ownlist') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+    const list = d.ownerIds.map(id => `<@${id}>`).join('\n') || '*Aucun*';
+    const embed = new EmbedBuilder().setTitle('👑 Owners Bot').setDescription(list).setColor(0xffd700);
+    return interaction.reply({ embeds: [embed], ephemeral: true });
+  }
+
+  // ════ PANEL COMMANDS ════
+  if (commandName === 'paneltitle') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+    d.panel.title = interaction.options.getString('titre');
+    return interaction.reply({ content: `✅ Titre mis à jour : **${d.panel.title}**`, ephemeral: true });
+  }
+
+  if (commandName === 'paneldescription') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+    d.panel.description = interaction.options.getString('desc').replace(/\\n/g, '\n');
+    return interaction.reply({ content: '✅ Description mise à jour.', ephemeral: true });
+  }
+
+  if (commandName === 'panelselection') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+    const id = interaction.options.getString('id');
+    const label = interaction.options.getString('label');
+    const desc = interaction.options.getString('description');
+    if (d.panel.selections.find(s => s.id === id)) return interaction.reply({ content: '⚠️ ID déjà existant.', ephemeral: true });
+    if (d.panel.selections.length >= 25) return interaction.reply({ content: '❌ Maximum 25 options.', ephemeral: true });
+    d.panel.selections.push({ id, label, description: desc, pingRoleId: null, categoryId: null });
+    return interaction.reply({ content: `✅ Sélection **${label}** ajoutée.`, ephemeral: true });
+  }
+
+  if (commandName === 'paneldelselection') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+    const id = interaction.options.getString('id');
+    const before = d.panel.selections.length;
+    d.panel.selections = d.panel.selections.filter(s => s.id !== id);
+    if (d.panel.selections.length === before) return interaction.reply({ content: '❌ ID introuvable.', ephemeral: true });
+    return interaction.reply({ content: `✅ Sélection **${id}** supprimée.`, ephemeral: true });
+  }
+
+  if (commandName === 'panelsetpingrole') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+    const id = interaction.options.getString('id');
+    const role = interaction.options.getRole('role');
+    const sel = d.panel.selections.find(s => s.id === id);
+    if (!sel) return interaction.reply({ content: '❌ Sélection introuvable.', ephemeral: true });
+    sel.pingRoleId = role.id;
+    return interaction.reply({ content: `✅ Rôle pingé pour **${id}** : ${role}`, ephemeral: true });
+  }
+
+  if (commandName === 'panelsetcategory') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+    const id = interaction.options.getString('id');
+    const cat = interaction.options.getChannel('categorie');
+    if (cat.type !== ChannelType.GuildCategory) return interaction.reply({ content: '❌ Ce n\'est pas une catégorie.', ephemeral: true });
+    const sel = d.panel.selections.find(s => s.id === id);
+    if (!sel) return interaction.reply({ content: '❌ Sélection introuvable.', ephemeral: true });
+    sel.categoryId = cat.id;
+    return interaction.reply({ content: `✅ Catégorie pour **${id}** : ${cat.name}`, ephemeral: true });
+  }
+
+  if (commandName === 'panel') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+    const { embed, row } = buildPanelComponents(gId);
+    await interaction.channel.send({ embeds: [embed], components: [row] });
+    return interaction.reply({ content: '✅ Panel envoyé !', ephemeral: true });
+  }
+
+  // ════ TICKET COMMANDS ════
+  if (commandName === 'add') {
+    if (!isManager(gId, interaction.member)) return interaction.reply({ content: '❌ Permission insuffisante.', ephemeral: true });
+    const ticket = d.tickets[interaction.channelId];
+    if (!ticket) return interaction.reply({ content: '❌ Ce salon n\'est pas un ticket.', ephemeral: true });
+    const user = interaction.options.getUser('user');
+    try {
+      await interaction.channel.permissionOverwrites.create(user.id, {
+        ViewChannel: true, SendMessages: true, ReadMessageHistory: true,
+      });
+      await interaction.reply({ content: `✅ ${user} ajouté au ticket.` });
+    } catch {
+      await interaction.reply({ content: '❌ Impossible d\'ajouter cet utilisateur.', ephemeral: true });
+    }
+    return;
+  }
+
+  if (commandName === 'remove') {
+    if (!isManager(gId, interaction.member)) return interaction.reply({ content: '❌ Permission insuffisante.', ephemeral: true });
+    const ticket = d.tickets[interaction.channelId];
+    if (!ticket) return interaction.reply({ content: '❌ Ce salon n\'est pas un ticket.', ephemeral: true });
+    const user = interaction.options.getUser('user');
+    if (user.id === ticket.userId) return interaction.reply({ content: '❌ Impossible de retirer le créateur du ticket.', ephemeral: true });
+    try {
+      await interaction.channel.permissionOverwrites.delete(user.id);
+      await interaction.reply({ content: `✅ ${user} retiré du ticket.` });
+    } catch {
+      await interaction.reply({ content: '❌ Impossible de retirer cet utilisateur.', ephemeral: true });
+    }
+    return;
+  }
+
+  if (commandName === 'close') {
+    if (!isManager(gId, interaction.member)) return interaction.reply({ content: '❌ Permission insuffisante.', ephemeral: true });
+    const ticket = d.tickets[interaction.channelId];
+    if (!ticket) return interaction.reply({ content: '❌ Ce salon n\'est pas un ticket.', ephemeral: true });
+    await interaction.reply({ content: '🔒 Fermeture dans **5**...' });
+    for (let i = 4; i >= 0; i--) {
+      await new Promise(r => setTimeout(r, 1000));
+      try { await interaction.channel.send({ content: `🔒 **${i}**...` }); } catch {}
+    }
+    await new Promise(r => setTimeout(r, 1000));
+    try {
+      const logEmbed = new EmbedBuilder()
+        .setTitle('🔒 Ticket Fermé')
+        .setDescription(`**Salon :** ${interaction.channel.name}\n**Fermé par :** ${interaction.user}`)
+        .setColor(0xff4444).setTimestamp();
+      await sendLog(interaction.guild, 'tickets', logEmbed);
+      delete d.tickets[interaction.channelId];
+      await interaction.channel.delete();
+    } catch {}
+    return;
+  }
+
+  if (commandName === 'delete') {
+    if (!isManager(gId, interaction.member)) return interaction.reply({ content: '❌ Permission insuffisante.', ephemeral: true });
+    if (!d.tickets[interaction.channelId]) return interaction.reply({ content: '❌ Ce salon n\'est pas un ticket.', ephemeral: true });
+    try {
+      const logEmbed = new EmbedBuilder()
+        .setTitle('🗑️ Ticket Supprimé')
+        .setDescription(`**Salon :** ${interaction.channel.name}\n**Supprimé par :** ${interaction.user}`)
+        .setColor(0xff0000).setTimestamp();
+      await sendLog(interaction.guild, 'tickets', logEmbed);
+      delete d.tickets[interaction.channelId];
+      await interaction.channel.delete();
+    } catch {
+      await interaction.reply({ content: '❌ Impossible de supprimer ce salon.', ephemeral: true });
+    }
+    return;
+  }
+
+  if (commandName === 'rename') {
+    if (!isManager(gId, interaction.member)) return interaction.reply({ content: '❌ Permission insuffisante.', ephemeral: true });
+    if (!d.tickets[interaction.channelId]) return interaction.reply({ content: '❌ Ce salon n\'est pas un ticket.', ephemeral: true });
+    const nom = interaction.options.getString('nom');
+    try {
+      await interaction.channel.setName(`💋・${nom}`);
+      await interaction.reply({ content: `✅ Ticket renommé en **💋・${nom}**` });
+    } catch {
+      await interaction.reply({ content: '❌ Impossible de renommer.', ephemeral: true });
+    }
+    return;
+  }
+
+  // ════ SETUP COMMANDS ════
+  if (commandName === 'addmanagerole') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+    const role = interaction.options.getRole('role');
+    if (d.managerRoles.includes(role.id)) return interaction.reply({ content: '⚠️ Déjà manager.', ephemeral: true });
+    d.managerRoles.push(role.id);
+    return interaction.reply({ content: `✅ ${role} ajouté comme rôle manager.`, ephemeral: true });
+  }
+
+  if (commandName === 'removemanagerole') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+    const role = interaction.options.getRole('role');
+    d.managerRoles = d.managerRoles.filter(id => id !== role.id);
+    return interaction.reply({ content: `✅ ${role} retiré des managers.`, ephemeral: true });
+  }
+
+  if (commandName === 'listmanageroles') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+    const list = d.managerRoles.map(id => `<@&${id}>`).join('\n') || '*Aucun*';
+    const embed = new EmbedBuilder().setTitle('🔧 Rôles Managers').setDescription(list).setColor(0x5865f2);
+    return interaction.reply({ embeds: [embed], ephemeral: true });
+  }
+
+  if (commandName === 'setlogschannel') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+    const type = interaction.options.getString('type');
+    const salon = interaction.options.getChannel('salon');
+    const validTypes = ['tickets','antiraid','antispam','antibot','protection','sanctions','advanced','security'];
+    if (!validTypes.includes(type)) return interaction.reply({ content: `❌ Type invalide. Valeurs : ${validTypes.join(', ')}`, ephemeral: true });
+    d.logsChannels[type] = salon.id;
+    return interaction.reply({ content: `✅ Logs **${type}** → ${salon}`, ephemeral: true });
+  }
+
+  if (commandName === 'setuplogs') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+    await interaction.deferReply({ ephemeral: true });
+    try {
+      await ensureLogCategory(interaction.guild);
+      return interaction.editReply({ content: '✅ Catégorie et salons de logs créés (ou déjà existants détectés).' });
+    } catch (e) {
+      return interaction.editReply({ content: `❌ Erreur : ${e.message}` });
+    }
+  }
+
+  // ════ ANTI-RAID ════
+  if (commandName === 'antiraid') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+    const action = interaction.options.getString('action');
+    d.antiRaid.enabled = (action === 'on');
+    return interaction.reply({ content: `✅ Anti-raid **${action === 'on' ? 'activé' : 'désactivé'}**.`, ephemeral: true });
+  }
+
+  if (commandName === 'antilink') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+    const action = interaction.options.getString('action');
+    d.antiLink.enabled = (action === 'on');
+    return interaction.reply({ content: `✅ Anti-lien **${action === 'on' ? 'activé' : 'désactivé'}**.`, ephemeral: true });
+  }
+
+  if (commandName === 'setbypassrole') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+    const role = interaction.options.getRole('role');
+    if (!d.antiLink.fullBypassRoles.includes(role.id)) d.antiLink.fullBypassRoles.push(role.id);
+    return interaction.reply({ content: `✅ ${role} peut envoyer tous les liens.`, ephemeral: true });
+  }
+
+  if (commandName === 'setgifonlyrole') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+    const role = interaction.options.getRole('role');
+    if (!d.antiLink.gifOnlyBypassRoles.includes(role.id)) d.antiLink.gifOnlyBypassRoles.push(role.id);
+    return interaction.reply({ content: `✅ ${role} peut envoyer des GIFs uniquement (pas de liens externes).`, ephemeral: true });
+  }
+
+  // ════ LOCKDOWN ════
+  if (commandName === 'lockdown') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+    const action = interaction.options.getString('action');
+    await interaction.deferReply({ ephemeral: true });
+    d.lockdown = (action === 'on');
+    try {
+      const channels = interaction.guild.channels.cache.filter(c => c.type === ChannelType.GuildText);
+      for (const [, ch] of channels) {
+        try {
+          await ch.permissionOverwrites.edit(interaction.guild.roles.everyone, {
+            SendMessages: action === 'on' ? false : null,
+          });
+        } catch {}
+      }
+      const logEmbed = new EmbedBuilder()
+        .setTitle(action === 'on' ? '🔴 LOCKDOWN ACTIVÉ' : '🟢 LOCKDOWN DÉSACTIVÉ')
+        .setDescription(`**Par :** ${interaction.user}`)
+        .setColor(action === 'on' ? 0xff0000 : 0x00ff00).setTimestamp();
+      await sendLog(interaction.guild, 'security', logEmbed);
+      return interaction.editReply({ content: `✅ Lockdown **${action === 'on' ? 'activé' : 'désactivé'}**.` });
+    } catch (e) {
+      return interaction.editReply({ content: `❌ Erreur : ${e.message}` });
+    }
+  }
+
+  if (commandName === 'maintenance') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+    const action = interaction.options.getString('action');
+    d.maintenance = (action === 'on');
+    client.user.setPresence({
+      activities: [{ name: action === 'on' ? '🔧 Maintenance...' : '💋 Mayssa • Call me Mayssa' }],
+      status: action === 'on' ? 'idle' : 'dnd',
+    });
+    return interaction.reply({ content: `✅ Mode maintenance **${action === 'on' ? 'activé' : 'désactivé'}**.`, ephemeral: true });
+  }
+
+  if (commandName === 'whitelist') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+    const action = interaction.options.getString('action');
+    const user = interaction.options.getUser('user');
+    if (action === 'add') {
+      if (!user) return interaction.reply({ content: '❌ Précise un utilisateur.', ephemeral: true });
+      if (!d.whitelist.includes(user.id)) d.whitelist.push(user.id);
+      return interaction.reply({ content: `✅ ${user} ajouté à la whitelist.`, ephemeral: true });
+    } else if (action === 'remove') {
+      if (!user) return interaction.reply({ content: '❌ Précise un utilisateur.', ephemeral: true });
+      d.whitelist = d.whitelist.filter(id => id !== user.id);
+      return interaction.reply({ content: `✅ ${user} retiré de la whitelist.`, ephemeral: true });
+    } else {
+      const list = d.whitelist.map(id => `<@${id}>`).join('\n') || '*Vide*';
+      const embed = new EmbedBuilder().setTitle('🛡️ Whitelist Admin').setDescription(list).setColor(0x00ff99);
+      return interaction.reply({ embeds: [embed], ephemeral: true });
+    }
+  }
+
+  // ════ RÈGLEMENT ════
+  if (commandName === 'rule') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+    const message = interaction.options.getString('message').replace(/\\n/g, '\n');
+    const role = interaction.options.getRole('role');
+
+    const embed = new EmbedBuilder()
+      .setTitle('📜 Règlement — Mayssa')
+      .setDescription(message)
+      .setColor(0x2b0a2b)
+      .setFooter({ text: 'Clique sur le bouton ci-dessous pour valider et obtenir l\'accès 💋' })
+      .setTimestamp();
+
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`rule_accept_${role.id}`)
+        .setLabel('✅ J\'accepte le règlement')
+        .setStyle(ButtonStyle.Success)
+    );
+
+    await interaction.channel.send({ embeds: [embed], components: [row] });
+    return interaction.reply({ content: `✅ Règlement envoyé. Le rôle ${role} sera attribué après validation.`, ephemeral: true });
+  }
+});
+
+// ══════════════════════════════════════════════
+//  ANTI-LIEN — MessageCreate
+// ══════════════════════════════════════════════
+const LINK_REGEX = /https?:\/\/[^\s]+|discord\.gg\/[^\s]+|discord\.com\/invite\/[^\s]+/gi;
+const GIF_ONLY_ALLOWED = /tenor\.com|giphy\.com|media\.discordapp\.net.*\.gif|cdn\.discordapp\.com.*\.gif/i;
+const SPAM_THRESHOLD = 5; // msgs en 4 secondes
+const SPAM_WINDOW    = 4000;
+
+client.on(Events.MessageCreate, async message => {
+  if (!message.guild || message.author.bot) return;
+  const gId = message.guild.id;
+  const d = getGuild(gId);
+  const member = message.member;
+  if (!member) return;
+
+  // ── ANTI-SPAM ──
+  const uid = message.author.id;
+  const now = Date.now();
+  if (!d.antiSpam.userMessages[uid]) d.antiSpam.userMessages[uid] = [];
+  d.antiSpam.userMessages[uid] = d.antiSpam.userMessages[uid].filter(t => now - t < SPAM_WINDOW);
+  d.antiSpam.userMessages[uid].push(now);
+
+  if (d.antiSpam.userMessages[uid].length >= SPAM_THRESHOLD) {
+    if (!d.whitelist.includes(uid) && !isOwner(gId, uid)) {
+      try {
+        // Supprimer les messages en rafale
+        const msgs = await message.channel.messages.fetch({ limit: 10 });
+        const toDelete = msgs.filter(m => m.author.id === uid);
+        await message.channel.bulkDelete(toDelete, true);
+        await member.timeout(60000, 'Anti-spam : messages trop rapides');
+        const logEmbed = new EmbedBuilder()
+          .setTitle('🚫 Anti-Spam Déclenché')
+          .setDescription(`**Utilisateur :** ${message.author} (${uid})\n**Salon :** ${message.channel}\n**Action :** Timeout 1 minute`)
+          .setColor(0xff8800).setTimestamp();
+        await sendLog(message.guild, 'antispam', logEmbed);
+        d.antiSpam.userMessages[uid] = [];
+      } catch {}
+      return;
+    }
+  }
+
+  // ── ANTI-MENTION MASSIVE ──
+  const mentionCount = (message.content.match(/<@[!&]?\d+>/g) || []).length;
+  const hasMassMention = message.mentions.everyone || mentionCount >= 5;
+  if (hasMassMention && !d.whitelist.includes(uid) && !isOwner(gId, uid)) {
+    try {
+      await message.delete();
+      await member.timeout(300000, 'Anti-mention massive');
+      const logEmbed = new EmbedBuilder()
+        .setTitle('🚫 Mention Massive Détectée')
+        .setDescription(`**Utilisateur :** ${message.author}\n**Salon :** ${message.channel}`)
+        .setColor(0xff0000).setTimestamp();
+      await sendLog(message.guild, 'antispam', logEmbed);
+    } catch {}
+    return;
+  }
+
+  // ── ANTI-LIEN ──
+  if (d.antiLink.enabled && LINK_REGEX.test(message.content)) {
+    LINK_REGEX.lastIndex = 0;
+    // Bypass total
+    const hasFullBypass = d.antiLink.fullBypassRoles.some(rId => member.roles.cache.has(rId));
+    if (hasFullBypass) return;
+
+    // Bypass gif seulement
+    const hasGifBypass = d.antiLink.gifOnlyBypassRoles.some(rId => member.roles.cache.has(rId));
+    if (hasGifBypass) {
+      // Vérif que tous les liens sont des gifs autorisés
+      const links = message.content.match(LINK_REGEX) || [];
+      const allGifsOk = links.every(l => GIF_ONLY_ALLOWED.test(l));
+      if (allGifsOk) return;
+    }
+
+    // Pas de bypass : suppr + timeout
+    if (!d.whitelist.includes(uid) && !isOwner(gId, uid)) {
+      try {
+        await message.delete();
+        await member.timeout(60000, 'Anti-lien : envoi de lien non autorisé');
+        const warn = await message.channel.send({
+          content: `${message.author} ❌ Tu n'as pas la permission d'envoyer des liens. **Timeout 1 minute.**`,
+        });
+        setTimeout(() => warn.delete().catch(() => {}), 8000);
+        const logEmbed = new EmbedBuilder()
+          .setTitle('🔗 Lien Supprimé')
+          .setDescription(`**Utilisateur :** ${message.author}\n**Salon :** ${message.channel}\n**Contenu :** ${message.content.slice(0, 200)}`)
+          .setColor(0xff6600).setTimestamp();
+        await sendLog(message.guild, 'antiraid', logEmbed);
+      } catch {}
+    }
+  }
+
+  // ── MESSAGES RÉPÉTÉS ──
+  const recentSame = d.antiSpam.userMessages[uid] &&
+    d.antiSpam.userMessages[uid].length >= 3;
+  // (déjà géré par le threshold général, pas besoin de double-check)
+});
+
+// ══════════════════════════════════════════════
+//  ANTI-RAID — GuildMemberAdd
+// ══════════════════════════════════════════════
+const RAID_THRESHOLDS = [
+  { count: 10, window: 10000, action: 'warn' },
+  { count: 20, window: 15000, action: 'quarantine' },
+  { count: 50, window: 20000, action: 'lockdown' },
+];
+
+client.on(Events.GuildMemberAdd, async member => {
+  const gId = member.guild.id;
+  const d = getGuild(gId);
+  if (!d.antiRaid.enabled) return;
+
+  const now = Date.now();
+  d.antiRaid.joinTimestamps.push(now);
+  d.antiRaid.joinTimestamps = d.antiRaid.joinTimestamps.filter(t => now - t < 20000);
+
+  // Vérif bots
+  if (member.user.bot) {
+    try {
+      await member.kick('Anti-bot : ajout de bot non autorisé');
+      const logEmbed = new EmbedBuilder()
+        .setTitle('🤖 Bot Kické')
+        .setDescription(`**Bot :** ${member.user.tag} (${member.id})`)
+        .setColor(0xff0000).setTimestamp();
+      await sendLog(member.guild, 'antibot', logEmbed);
+    } catch {}
+    return;
+  }
+
+  // Compte récent (< 7 jours)
+  const accountAge = Date.now() - member.user.createdTimestamp;
+  const sevenDays = 7 * 24 * 60 * 60 * 1000;
+  if (accountAge < sevenDays) {
+    const logEmbed = new EmbedBuilder()
+      .setTitle('🤖 Compte Récent Détecté')
+      .setDescription(`**Membre :** ${member.user.tag}\n**Créé il y a :** ${Math.floor(accountAge / 86400000)} jour(s)`)
+      .setColor(0xffaa00).setTimestamp();
+    await sendLog(member.guild, 'antibot', logEmbed);
+  }
+
+  const joinCount = d.antiRaid.joinTimestamps.length;
+
+  for (const threshold of RAID_THRESHOLDS.reverse()) {
+    const recent = d.antiRaid.joinTimestamps.filter(t => now - t < threshold.window).length;
+    if (recent >= threshold.count) {
+      if (threshold.action === 'lockdown' && !d.antiRaid.locked) {
+        d.antiRaid.locked = true;
+        try {
+          const channels = member.guild.channels.cache.filter(c => c.type === ChannelType.GuildText);
+          for (const [, ch] of channels) {
+            try {
+              await ch.permissionOverwrites.edit(member.guild.roles.everyone, { SendMessages: false });
+            } catch {}
+          }
+        } catch {}
+        const logEmbed = new EmbedBuilder()
+          .setTitle('🚨 ANTI-RAID : LOCKDOWN AUTOMATIQUE')
+          .setDescription(`**${recent} membres** ont rejoint en ${threshold.window / 1000}s.\nServeur verrouillé automatiquement.`)
+          .setColor(0xff0000).setTimestamp();
+        await sendLog(member.guild, 'antiraid', logEmbed);
+      } else if (threshold.action === 'quarantine') {
+        d.antiRaid.quarantinedUsers.push(member.id);
+        try {
+          await member.timeout(600000, 'Anti-raid : arrivée massive');
+        } catch {}
+        const logEmbed = new EmbedBuilder()
+          .setTitle('🛡️ ANTI-RAID : Quarantaine')
+          .setDescription(`**Membre :** ${member.user.tag}\n**${recent} membres** ont rejoint récemment.`)
+          .setColor(0xff8800).setTimestamp();
+        await sendLog(member.guild, 'antiraid', logEmbed);
+      } else {
+        const logEmbed = new EmbedBuilder()
+          .setTitle('⚠️ ANTI-RAID : Alerte Joins')
+          .setDescription(`**${recent} membres** ont rejoint en ${threshold.window / 1000}s.`)
+          .setColor(0xffff00).setTimestamp();
+        await sendLog(member.guild, 'antiraid', logEmbed);
+      }
+      break;
+    }
+  }
+  RAID_THRESHOLDS.reverse(); // remettre dans l'ordre
+});
+
+// ══════════════════════════════════════════════
+//  PROTECTION SERVEUR — Audit Log Events
+// ══════════════════════════════════════════════
+
+// Backup des channels à la connexion
+client.on(Events.ClientReady, () => {
+  for (const [, guild] of client.guilds.cache) {
+    backupChannels(guild);
+  }
+});
+
+function backupChannels(guild) {
+  const d = getGuild(guild.id);
+  d.channelBackup = {};
+  for (const [id, ch] of guild.channels.cache) {
+    if (ch.type === ChannelType.GuildText || ch.type === ChannelType.GuildVoice) {
+      d.channelBackup[id] = {
+        name: ch.name,
+        type: ch.type,
+        parentId: ch.parentId,
+        position: ch.position,
+      };
+    }
+  }
+}
+
+// Suppression de salon
+client.on(Events.ChannelDelete, async channel => {
+  if (!channel.guild) return;
+  const gId = channel.guild.id;
+  const d = getGuild(gId);
+  const backup = d.channelBackup[channel.id];
+  if (!backup) return;
+
+  // Récupérer qui a supprimé via audit log
+  let deletedBy = null;
+  try {
+    await new Promise(r => setTimeout(r, 1000));
+    const logs = await channel.guild.fetchAuditLogs({ type: AuditLogEvent.ChannelDelete, limit: 1 });
+    const entry = logs.entries.first();
+    if (entry && Date.now() - entry.createdTimestamp < 5000) {
+      deletedBy = entry.executor;
+    }
+  } catch {}
+
+  const logEmbed = new EmbedBuilder()
+    .setTitle('🔨 Salon Supprimé')
+    .setDescription(`**Salon :** ${backup.name}\n**Par :** ${deletedBy ? deletedBy.tag : 'Inconnu'}`)
+    .setColor(0xff4444).setTimestamp();
+  await sendLog(channel.guild, 'protection', logEmbed);
+
+  // Restaurer si ce n'est pas le bot ou whitelist
+  if (deletedBy && !d.whitelist.includes(deletedBy.id) && !isOwner(gId, deletedBy.id)) {
+    try {
+      await channel.guild.channels.create({
+        name: backup.name,
+        type: backup.type,
+        parent: backup.parentId,
+        position: backup.position,
+      });
+      const restoreEmbed = new EmbedBuilder()
+        .setTitle('✅ Salon Restauré')
+        .setDescription(`**Salon :** ${backup.name} a été restauré automatiquement.`)
+        .setColor(0x00ff99).setTimestamp();
+      await sendLog(channel.guild, 'protection', restoreEmbed);
+    } catch {}
+  }
+
+  delete d.channelBackup[channel.id];
+});
+
+// Mise à jour backup à la création
+client.on(Events.ChannelCreate, async channel => {
+  if (!channel.guild) return;
+  const d = getGuild(channel.guild.id);
+
+  // Détecter création massive
+  const now = Date.now();
+  if (!d._channelCreateTimestamps) d._channelCreateTimestamps = [];
+  d._channelCreateTimestamps = d._channelCreateTimestamps.filter(t => now - t < 10000);
+  d._channelCreateTimestamps.push(now);
+
+  if (d._channelCreateTimestamps.length >= 5) {
+    const logEmbed = new EmbedBuilder()
+      .setTitle('⚠️ Création Massive de Salons')
+      .setDescription(`**${d._channelCreateTimestamps.length}** salons créés en 10 secondes !`)
+      .setColor(0xff8800).setTimestamp();
+    await sendLog(channel.guild, 'protection', logEmbed);
+  }
+
+  d.channelBackup[channel.id] = {
+    name: channel.name,
+    type: channel.type,
+    parentId: channel.parentId,
+    position: channel.position,
+  };
+});
+
+// ══════════════════════════════════════════════
+//  LOGS AVANCÉS
+// ══════════════════════════════════════════════
+
+// Ban
+client.on(Events.GuildBanAdd, async ban => {
+  const logEmbed = new EmbedBuilder()
+    .setTitle('🔨 Membre Banni')
+    .setDescription(`**Membre :** ${ban.user.tag} (${ban.user.id})\n**Raison :** ${ban.reason || 'Non précisée'}`)
+    .setColor(0xff0000).setTimestamp();
+  await sendLog(ban.guild, 'advanced', logEmbed);
+  await sendLog(ban.guild, 'sanctions', logEmbed);
+});
+
+// Kick (via audit log sur member remove)
+client.on(Events.GuildMemberRemove, async member => {
+  try {
+    await new Promise(r => setTimeout(r, 1000));
+    const logs = await member.guild.fetchAuditLogs({ type: AuditLogEvent.MemberKick, limit: 1 });
+    const entry = logs.entries.first();
+    if (entry && entry.target?.id === member.id && Date.now() - entry.createdTimestamp < 5000) {
+      const logEmbed = new EmbedBuilder()
+        .setTitle('👢 Membre Kické')
+        .setDescription(`**Membre :** ${member.user.tag}\n**Par :** ${entry.executor?.tag}\n**Raison :** ${entry.reason || 'Non précisée'}`)
+        .setColor(0xff8800).setTimestamp();
+      await sendLog(member.guild, 'advanced', logEmbed);
+      await sendLog(member.guild, 'sanctions', logEmbed);
+    }
+  } catch {}
+});
+
+// Modification de rôle
+client.on(Events.GuildRoleUpdate, async (oldRole, newRole) => {
+  const logEmbed = new EmbedBuilder()
+    .setTitle('✏️ Rôle Modifié')
+    .setDescription(`**Rôle :** ${newRole.name}\n**Modifications :** permissions ou couleur changées`)
+    .setColor(0x5865f2).setTimestamp();
+  await sendLog(newRole.guild, 'advanced', logEmbed);
+});
+
+// Timeout (member update)
+client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
+  const wasTimedOut = !oldMember.communicationDisabledUntil && newMember.communicationDisabledUntil;
+  if (wasTimedOut) {
+    const logEmbed = new EmbedBuilder()
+      .setTitle('🔇 Membre Timeout (Mute)')
+      .setDescription(`**Membre :** ${newMember.user.tag}\n**Jusqu\'au :** ${newMember.communicationDisabledUntil.toLocaleString('fr-FR')}`)
+      .setColor(0xffaa00).setTimestamp();
+    await sendLog(newMember.guild, 'sanctions', logEmbed);
+  }
+});
+
+// ══════════════════════════════════════════════
+//  EXPRESS KEEPALIVE — Render
+// ══════════════════════════════════════════════
+const app = express();
+
+app.get('/', (req, res) => {
+  res.send('🌸 Mayssa Bot — En ligne 💋');
+});
+
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', guilds: client.guilds.cache.size, uptime: process.uptime() });
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`🌐 Serveur keepalive sur le port ${PORT}`);
+});
+
+// Self-ping toutes les 2 minutes (silence Render)
+if (RENDER_URL) {
+  setInterval(async () => {
+    try {
+      await fetch(`${RENDER_URL}/health`);
+      console.log('💓 Self-ping OK');
+    } catch (e) {
+      console.warn('⚠️ Self-ping failed:', e.message);
+    }
+  }, 2 * 60 * 1000); // 2 minutes
+}
+
+// ══════════════════════════════════════════════
+//  LOGIN
+// ══════════════════════════════════════════════
+client.login(TOKEN);

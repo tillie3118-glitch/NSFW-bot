@@ -1165,16 +1165,15 @@ app.listen(PORT, () => {
 });
 
 // Self-ping toutes les 2 minutes (silence Render)
-if (RENDER_URL) {
-  setInterval(async () => {
-    try {
-      await fetch(`${RENDER_URL}/health`);
-      console.log('💓 Self-ping OK');
-    } catch (e) {
-      console.warn('⚠️ Self-ping failed:', e.message);
-    }
-  }, 2 * 60 * 1000); // 2 minutes
-}
+const PING_URL = RENDER_URL || 'https://nsfw-bot-p9u8.onrender.com';
+setInterval(async () => {
+  try {
+    await fetch(`${PING_URL}/health`);
+    console.log('💓 Self-ping OK →', PING_URL);
+  } catch (e) {
+    console.warn('⚠️ Self-ping failed:', e.message);
+  }
+}, 2 * 60 * 1000); // 2 minutes
 
 // ══════════════════════════════════════════════
 //  LOGIN

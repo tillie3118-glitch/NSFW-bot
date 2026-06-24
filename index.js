@@ -17,7 +17,7 @@ const fetch = require('node-fetch');
 //  CONFIG — Variables d'environnement Render
 // ──────────────────────────────────────────────
 const TOKEN            = process.env.TOKEN;
-const CLIENT_ID        = process.env.CLIENT_ID;
+const CLIENT_ID        = process.env.CLIENT_ID || '1519233968749416498';
 const RENDER_URL       = process.env.RENDER_EXTERNAL_URL;
 
 const OWNER_IDS_DEFAULT = ['207283656203436042', '685679698054742017'];

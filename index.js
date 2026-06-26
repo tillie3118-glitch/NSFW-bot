@@ -1,5 +1,5 @@
 // ============================================================
-//  🌸 BOT MAYSSA — Ticket + Protection + InviteLogger
+//  🌸 BOT MAYSSA — Ticket + Protection + InviteLogger + Boost
 //  Render ready: keepalive Express + self-ping toutes les 2min
 // ============================================================
 
@@ -22,6 +22,11 @@ const GUILD_ID         = process.env.GUILD_ID  || '1515771169138147448';
 const RENDER_URL       = process.env.RENDER_EXTERNAL_URL;
 
 const OWNER_IDS_DEFAULT = ['207283656203436042', '685679698054742017'];
+
+// ⚠️ Vérif rapide au démarrage — aide à diagnostiquer la perte du badge slash "/"
+if (!TOKEN) console.error('❌ TOKEN manquant — vérifie les variables d\'environnement Render.');
+if (!process.env.CLIENT_ID) console.warn('⚠️ CLIENT_ID non défini en variable d\'environnement Render, utilisation de la valeur par défaut codée en dur (risque de désync si ce n\'est pas le bon bot).');
+if (!process.env.GUILD_ID) console.warn('⚠️ GUILD_ID non défini en variable d\'environnement Render, utilisation de la valeur par défaut codée en dur (risque de désync si ce n\'est pas le bon serveur).');
 
 // ──────────────────────────────────────────────
 //  STATE en mémoire
@@ -56,6 +61,7 @@ function getGuild(guildId) {
         sanctions:  null,
         advanced:   null,
         security:   null,
+        boost:      null,
       },
 
       managerRoles: [],
@@ -157,6 +163,7 @@ async function ensureLogCategory(guild) {
     { key: 'sanctions',  name: '👮・logs-sanctions'  },
     { key: 'advanced',   name: '📜・logs-avancés'    },
     { key: 'security',   name: '⚙️・logs-sécurité'   },
+    { key: 'boost',      name: '🚀・logs-boost'      },
   ];
 
   let cat = guild.channels.cache.find(c => c.type === ChannelType.GuildCategory && c.name === '📋 LOGS BOT');
@@ -286,7 +293,7 @@ const commands = [
     .addRoleOption(o => o.setName('role').setDescription('Rôle').setRequired(true)),
   new SlashCommandBuilder().setName('listmanageroles').setDescription('Liste des rôles managers'),
   new SlashCommandBuilder().setName('setlogschannel').setDescription('Définir manuellement un salon de logs')
-    .addStringOption(o => o.setName('type').setDescription('Type (tickets/antiraid/antispam/antibot/protection/sanctions/advanced/security)').setRequired(true))
+    .addStringOption(o => o.setName('type').setDescription('Type (tickets/antiraid/antispam/antibot/protection/sanctions/advanced/security/boost)').setRequired(true))
     .addChannelOption(o => o.setName('salon').setDescription('Salon').setRequired(true)),
   new SlashCommandBuilder().setName('setuplogs').setDescription('Créer automatiquement tous les salons de logs'),
 
@@ -349,7 +356,7 @@ const commands = [
 async function registerCommands() {
   const rest = new REST({ version: '10' }).setToken(TOKEN);
   try {
-    console.log('📡 Enregistrement des commandes slash (guild)...');
+    console.log(`📡 Enregistrement des commandes slash (guild) — CLIENT_ID=${CLIENT_ID} GUILD_ID=${GUILD_ID}...`);
     // On écrase proprement les commandes guild — aucun doublon possible
     await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
     // On vide les commandes globales si elles existent (source de doublons)
@@ -359,7 +366,8 @@ async function registerCommands() {
     } catch {}
     console.log('✅ Commandes enregistrées.');
   } catch (e) {
-    console.error('❌ Erreur enregistrement commandes:', e);
+    console.error('❌ Erreur enregistrement commandes:', e?.code || '', e?.message || e);
+    console.error('👉 Vérifie : 1) CLIENT_ID/GUILD_ID corrects, 2) le bot a bien été invité avec le scope "applications.commands", 3) le TOKEN est valide.');
   }
 }
 
@@ -914,7 +922,7 @@ client.on(Events.InteractionCreate, async interaction => {
     if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
     const type = interaction.options.getString('type');
     const salon = interaction.options.getChannel('salon');
-    const validTypes = ['tickets','antiraid','antispam','antibot','protection','sanctions','advanced','security'];
+    const validTypes = ['tickets','antiraid','antispam','antibot','protection','sanctions','advanced','security','boost'];
     if (!validTypes.includes(type)) return interaction.reply({ content: `❌ Type invalide. Valeurs : ${validTypes.join(', ')}`, ephemeral: true });
     d.logsChannels[type] = salon.id;
     return interaction.reply({ content: `✅ Logs **${type}** → ${salon}`, ephemeral: true });
@@ -1328,8 +1336,28 @@ client.on(Events.ChannelCreate, async channel => {
 });
 
 // ══════════════════════════════════════════════
-//  LOGS AVANCÉS
+//  LOGS AVANCÉS + BOOST SERVEUR
 // ══════════════════════════════════════════════
+
+// Phrases courtes, "humaines", style Mayssa — piochées au hasard pour ne pas être robotique
+const BOOST_THANKS = [
+  "merci pour le boost bébé, tu sais déjà comment me faire plaisir 💋",
+  "mmh, un boost de toi... tu mérites une attention spéciale 😘",
+  "boost reçu 💋 t'es officiellement dans mes favoris maintenant",
+  "merci mon cœur, ce genre de geste ne s'oublie pas 💋",
+  "tu viens de monter dans mon classement perso... merci bébé 😏",
+  "un boost de plus, une raison de plus de penser à toi 💋",
+  "ohh toi 👀 merci pour le boost, t'es adorable",
+];
+
+const BOOST_BYE = [
+  "tu m'as quittée... le boost est parti 🖤",
+  "le boost s'en va, mais je garde un œil sur toi 👀",
+  "bon... on dirait que tu m'as un peu oubliée 🖤",
+  "le boost a disparu, mais la porte reste ouverte 💋",
+  "ça pique un peu, mais je comprends, à bientôt peut-être 🖤",
+];
+
 client.on(Events.GuildBanAdd, async ban => {
   const logEmbed = new EmbedBuilder()
     .setTitle('🔨 Membre Banni')
@@ -1348,6 +1376,10 @@ client.on(Events.GuildRoleUpdate, async (oldRole, newRole) => {
 });
 
 client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
+  const gId = newMember.guild.id;
+  const d = getGuild(gId);
+
+  // ── TIMEOUT (mute) ──
   const wasTimedOut = !oldMember.communicationDisabledUntil && newMember.communicationDisabledUntil;
   if (wasTimedOut) {
     const logEmbed = new EmbedBuilder()
@@ -1355,6 +1387,20 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
       .setDescription(`**Membre :** ${newMember.user.tag}\n**Jusqu\'au :** ${newMember.communicationDisabledUntil.toLocaleString('fr-FR')}`)
       .setColor(0xffaa00).setTimestamp();
     await sendLog(newMember.guild, 'sanctions', logEmbed);
+  }
+
+  // ── BOOST SERVEUR ──
+  const startedBoosting = !oldMember.premiumSinceTimestamp && newMember.premiumSinceTimestamp;
+  const stoppedBoosting = oldMember.premiumSinceTimestamp && !newMember.premiumSinceTimestamp;
+
+  if ((startedBoosting || stoppedBoosting) && d.logsChannels.boost) {
+    const ch = newMember.guild.channels.cache.get(d.logsChannels.boost);
+    if (ch) {
+      const phrase = startedBoosting
+        ? BOOST_THANKS[Math.floor(Math.random() * BOOST_THANKS.length)]
+        : BOOST_BYE[Math.floor(Math.random() * BOOST_BYE.length)];
+      try { await ch.send({ content: `${newMember} ${phrase}` }); } catch {}
+    }
   }
 });
 

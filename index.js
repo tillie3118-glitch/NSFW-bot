@@ -1,5 +1,5 @@
 // ============================================================
-//  🌸 BOT MAYSSA — Ticket + Protection — index.js
+//  🌸 BOT MAYSSA — Ticket + Protection + InviteLogger
 //  Render ready: keepalive Express + self-ping toutes les 2min
 // ============================================================
 
@@ -24,19 +24,15 @@ const RENDER_URL       = process.env.RENDER_EXTERNAL_URL;
 const OWNER_IDS_DEFAULT = ['207283656203436042', '685679698054742017'];
 
 // ──────────────────────────────────────────────
-//  STATE en mémoire (persist via redémarrage
-//  grâce aux variables ci-dessous)
+//  STATE en mémoire
 // ──────────────────────────────────────────────
-// Toutes les données par guild
 const guildData = {};
 
 function getGuild(guildId) {
   if (!guildData[guildId]) {
     guildData[guildId] = {
-      // Owners bot
       ownerIds: [...OWNER_IDS_DEFAULT],
 
-      // Ticket panel config
       panel: {
         title: '🦋 • SUPPORT TICKET • 🦋',
         description: '♡ ••••• ♡\n\n*• Tu as envie de commander une prestation de Mayssa ? Une question ? Ou autre ?*\n\n💋 **Ouvre un ticket parmis les options suivantes :**',
@@ -49,10 +45,8 @@ function getGuild(guildId) {
         ],
       },
 
-      // Tickets ouverts : channelId -> { userId, claimedBy, selectionId }
       tickets: {},
 
-      // Logs channels
       logsChannels: {
         tickets:    null,
         antiraid:   null,
@@ -64,41 +58,40 @@ function getGuild(guildId) {
         security:   null,
       },
 
-      // Manager roles (peuvent /close /delete /add /remove)
       managerRoles: [],
 
-      // Anti-raid & spam
       antiRaid: {
         enabled: false,
-        joinTimestamps: [],       // timestamps des joins récents
+        joinTimestamps: [],
         quarantinedUsers: [],
         locked: false,
       },
 
-      // Anti-lien
       antiLink: {
         enabled: false,
-        fullBypassRoles: [],      // bypass total liens
-        gifOnlyBypassRoles: [],   // bypass gif uniquement
+        fullBypassRoles: [],
+        gifOnlyBypassRoles: [],
       },
 
-      // Anti-spam
       antiSpam: {
-        userMessages: {},         // userId -> [timestamps]
+        userMessages: {},
       },
 
-      // Whitelist sécurité
       whitelist: [],
-
-      // Règlement
-      rules: [],  // { messageId, channelId, roleId }
-
-      // Lockdown
+      rules: [],
       lockdown: false,
       maintenance: false,
-
-      // Sauvegarde channels (pour restauration)
       channelBackup: {},
+
+      // ── INVITE LOGGER ──
+      inviteLogger: {
+        joinChannelId: null,
+        leaveChannelId: null,
+        inviteCache: {},     // code -> { uses, inviterId, inviterTag }
+      },
+
+      // ── ROLEMEMBER ──
+      autoRoleId: null,    // rôle auto aux nouveaux arrivants
     };
   }
   return guildData[guildId];
@@ -115,6 +108,7 @@ const client = new Client({
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildMessageReactions,
     GatewayIntentBits.GuildModeration,
+    GatewayIntentBits.GuildInvites,
   ],
   partials: [Partials.Message, Partials.Reaction, Partials.Channel],
 });
@@ -137,7 +131,6 @@ function canClaimTicket(guildId, member, selectionId) {
   const d = getGuild(guildId);
   const sel = d.panel.selections.find(s => s.id === selectionId);
   if (!sel || !sel.pingRoleId) return isManager(guildId, member);
-  // Le rôle pingé ou plus haut dans la hiérarchie
   const pingRole = member.guild.roles.cache.get(sel.pingRoleId);
   if (!pingRole) return isManager(guildId, member);
   return member.roles.cache.some(r => r.position >= pingRole.position);
@@ -166,7 +159,6 @@ async function ensureLogCategory(guild) {
     { key: 'security',   name: '⚙️・logs-sécurité'   },
   ];
 
-  // Cherche ou crée la catégorie
   let cat = guild.channels.cache.find(c => c.type === ChannelType.GuildCategory && c.name === '📋 LOGS BOT');
   if (!cat) {
     cat = await guild.channels.create({
@@ -181,9 +173,8 @@ async function ensureLogCategory(guild) {
   for (const { key, name } of LOG_CHANNELS) {
     if (d.logsChannels[key]) {
       const existing = guild.channels.cache.get(d.logsChannels[key]);
-      if (existing) continue; // existe déjà, pas de doublon
+      if (existing) continue;
     }
-    // Cherche par nom dans la catégorie
     const existing = guild.channels.cache.find(c => c.name === name && c.parentId === cat.id);
     if (existing) {
       d.logsChannels[key] = existing.id;
@@ -202,7 +193,26 @@ async function ensureLogCategory(guild) {
 }
 
 // ──────────────────────────────────────────────
-//  BUILD TICKET PANEL EMBED + SELECT MENU
+//  INVITE LOGGER HELPERS
+// ──────────────────────────────────────────────
+async function cacheInvites(guild) {
+  try {
+    const d = getGuild(guild.id);
+    const invites = await guild.invites.fetch();
+    d.inviteLogger.inviteCache = {};
+    invites.forEach(inv => {
+      d.inviteLogger.inviteCache[inv.code] = {
+        uses: inv.uses,
+        inviterId: inv.inviter?.id || null,
+        inviterTag: inv.inviter?.username || 'Inconnu',
+        inviterMention: inv.inviter ? `<@${inv.inviter.id}>` : 'Inconnu',
+      };
+    });
+  } catch {}
+}
+
+// ──────────────────────────────────────────────
+//  BUILD TICKET PANEL
 // ──────────────────────────────────────────────
 function buildPanelComponents(guildId) {
   const d = getGuild(guildId);
@@ -230,7 +240,7 @@ function buildPanelComponents(guildId) {
 }
 
 // ──────────────────────────────────────────────
-//  SLASH COMMANDS DEFINITIONS
+//  SLASH COMMANDS (liste unique, sans doublons)
 // ──────────────────────────────────────────────
 const commands = [
   // ── OWNER ──
@@ -289,7 +299,7 @@ const commands = [
       .addChoices({ name: 'Activer', value: 'on' }, { name: 'Désactiver', value: 'off' })),
   new SlashCommandBuilder().setName('setbypassrole').setDescription('Rôle bypass total des liens')
     .addRoleOption(o => o.setName('role').setDescription('Rôle').setRequired(true)),
-  new SlashCommandBuilder().setName('setgifonlyrole').setDescription('Rôle bypass gif uniquement (pas de liens ext.)')
+  new SlashCommandBuilder().setName('setgifonlyrole').setDescription('Rôle bypass gif uniquement')
     .addRoleOption(o => o.setName('role').setDescription('Rôle').setRequired(true)),
   new SlashCommandBuilder().setName('lockdown').setDescription('Mode urgence : verrouille tous les salons')
     .addStringOption(o => o.setName('action').setDescription('on / off').setRequired(true)
@@ -306,16 +316,47 @@ const commands = [
   new SlashCommandBuilder().setName('rule').setDescription('Envoyer le règlement avec réaction rôle')
     .addStringOption(o => o.setName('message').setDescription('Texte du règlement').setRequired(true))
     .addRoleOption(o => o.setName('role').setDescription('Rôle attribué après validation').setRequired(true)),
+
+  // ── ROLEMEMBER ──
+  new SlashCommandBuilder().setName('rolemember').setDescription('Donne un rôle à TOUS les membres + auto aux nouveaux')
+    .addRoleOption(o => o.setName('role').setDescription('Rôle à attribuer').setRequired(true)),
+
+  // ── SAY ──
+  new SlashCommandBuilder().setName('say').setDescription('Envoyer un message ou embed dans un salon')
+    .addChannelOption(o => o.setName('salon').setDescription('Salon cible').setRequired(true))
+    .addStringOption(o => o.setName('message').setDescription('Texte du message').setRequired(true))
+    .addStringOption(o => o.setName('style').setDescription('Envoyer en embed ou texte simple').setRequired(true)
+      .addChoices({ name: '💋 Embed (stylisé)', value: 'embed' }, { name: '💬 Texte simple', value: 'text' }))
+    .addStringOption(o => o.setName('titre').setDescription('Titre de l\'embed (optionnel)'))
+    .addStringOption(o => o.setName('couleur').setDescription('Couleur hex de l\'embed ex: #FF00AA (optionnel)')),
+
+  // ── INVITE LOGGER ──
+  new SlashCommandBuilder().setName('invitelogger').setDescription('Configurer le système d\'invite logger')
+    .addStringOption(o => o.setName('action').setDescription('Action').setRequired(true)
+      .addChoices(
+        { name: 'Définir salon arrivée', value: 'setjoin' },
+        { name: 'Définir salon départ', value: 'setleave' },
+        { name: 'Activer / Reset cache', value: 'enable' },
+        { name: 'Voir config actuelle', value: 'status' },
+      ))
+    .addChannelOption(o => o.setName('salon').setDescription('Salon (pour setjoin / setleave)')),
+
 ].map(c => c.toJSON());
 
 // ──────────────────────────────────────────────
-//  REGISTER SLASH COMMANDS
+//  REGISTER SLASH COMMANDS (guild only, pas de global)
 // ──────────────────────────────────────────────
 async function registerCommands() {
   const rest = new REST({ version: '10' }).setToken(TOKEN);
   try {
-    console.log('📡 Enregistrement des commandes slash...');
+    console.log('📡 Enregistrement des commandes slash (guild)...');
+    // On écrase proprement les commandes guild — aucun doublon possible
     await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
+    // On vide les commandes globales si elles existent (source de doublons)
+    try {
+      await rest.put(Routes.applicationCommands(CLIENT_ID), { body: [] });
+      console.log('🧹 Commandes globales vidées (anti-doublon).');
+    } catch {}
     console.log('✅ Commandes enregistrées.');
   } catch (e) {
     console.error('❌ Erreur enregistrement commandes:', e);
@@ -330,42 +371,236 @@ client.once(Events.ClientReady, async () => {
   client.user.setPresence({ activities: [{ name: '💋 Mayssa • Call me Mayssa' }], status: 'dnd' });
   await registerCommands();
 
-  // Initialiser les logs pour chaque guild
   for (const guild of client.guilds.cache.values()) {
     try { await ensureLogCategory(guild); } catch {}
+    try { await cacheInvites(guild); } catch {}
+    backupChannels(guild);
   }
 });
 
 client.on(Events.GuildCreate, async guild => {
   try { await ensureLogCategory(guild); } catch {}
+  try { await cacheInvites(guild); } catch {}
 });
 
 // ══════════════════════════════════════════════
-//  EVENT: INTERACTION (Slash + Select + Button)
+//  INVITE LOGGER — Mise à jour cache à chaque nouvelle invite
+// ══════════════════════════════════════════════
+client.on(Events.InviteCreate, async invite => {
+  if (!invite.guild) return;
+  await cacheInvites(invite.guild);
+});
+
+client.on(Events.InviteDelete, async invite => {
+  if (!invite.guild) return;
+  await cacheInvites(invite.guild);
+});
+
+// ══════════════════════════════════════════════
+//  GUILDMEMBERADD — Auto-rôle + Invite Logger
+// ══════════════════════════════════════════════
+client.on(Events.GuildMemberAdd, async member => {
+  const gId = member.guild.id;
+  const d = getGuild(gId);
+
+  // ── AUTO-RÔLE ──
+  if (d.autoRoleId) {
+    try {
+      await member.roles.add(d.autoRoleId);
+    } catch {}
+  }
+
+  // ── ANTI-RAID ──
+  if (d.antiRaid.enabled) {
+    const now = Date.now();
+    d.antiRaid.joinTimestamps.push(now);
+    d.antiRaid.joinTimestamps = d.antiRaid.joinTimestamps.filter(t => now - t < 20000);
+
+    if (member.user.bot) {
+      try {
+        await member.kick('Anti-bot : ajout de bot non autorisé');
+        const logEmbed = new EmbedBuilder()
+          .setTitle('🤖 Bot Kické')
+          .setDescription(`**Bot :** ${member.user.tag} (${member.id})`)
+          .setColor(0xff0000).setTimestamp();
+        await sendLog(member.guild, 'antibot', logEmbed);
+      } catch {}
+      return;
+    }
+
+    const accountAge = Date.now() - member.user.createdTimestamp;
+    const sevenDays = 7 * 24 * 60 * 60 * 1000;
+    if (accountAge < sevenDays) {
+      const logEmbed = new EmbedBuilder()
+        .setTitle('🤖 Compte Récent Détecté')
+        .setDescription(`**Membre :** ${member.user.tag}\n**Créé il y a :** ${Math.floor(accountAge / 86400000)} jour(s)`)
+        .setColor(0xffaa00).setTimestamp();
+      await sendLog(member.guild, 'antibot', logEmbed);
+    }
+
+    const RAID_THRESHOLDS = [
+      { count: 50, window: 20000, action: 'lockdown' },
+      { count: 20, window: 15000, action: 'quarantine' },
+      { count: 10, window: 10000, action: 'warn' },
+    ];
+
+    for (const threshold of RAID_THRESHOLDS) {
+      const recent = d.antiRaid.joinTimestamps.filter(t => now - t < threshold.window).length;
+      if (recent >= threshold.count) {
+        if (threshold.action === 'lockdown' && !d.antiRaid.locked) {
+          d.antiRaid.locked = true;
+          try {
+            const channels = member.guild.channels.cache.filter(c => c.type === ChannelType.GuildText);
+            for (const [, ch] of channels) {
+              try {
+                await ch.permissionOverwrites.edit(member.guild.roles.everyone, { SendMessages: false });
+              } catch {}
+            }
+          } catch {}
+          const logEmbed = new EmbedBuilder()
+            .setTitle('🚨 ANTI-RAID : LOCKDOWN AUTOMATIQUE')
+            .setDescription(`**${recent} membres** ont rejoint en ${threshold.window / 1000}s.\nServeur verrouillé automatiquement.`)
+            .setColor(0xff0000).setTimestamp();
+          await sendLog(member.guild, 'antiraid', logEmbed);
+        } else if (threshold.action === 'quarantine') {
+          d.antiRaid.quarantinedUsers.push(member.id);
+          try { await member.timeout(600000, 'Anti-raid : arrivée massive'); } catch {}
+          const logEmbed = new EmbedBuilder()
+            .setTitle('🛡️ ANTI-RAID : Quarantaine')
+            .setDescription(`**Membre :** ${member.user.tag}\n**${recent} membres** ont rejoint récemment.`)
+            .setColor(0xff8800).setTimestamp();
+          await sendLog(member.guild, 'antiraid', logEmbed);
+        } else {
+          const logEmbed = new EmbedBuilder()
+            .setTitle('⚠️ ANTI-RAID : Alerte Joins')
+            .setDescription(`**${recent} membres** ont rejoint en ${threshold.window / 1000}s.`)
+            .setColor(0xffff00).setTimestamp();
+          await sendLog(member.guild, 'antiraid', logEmbed);
+        }
+        break;
+      }
+    }
+  }
+
+  // ── INVITE LOGGER : arrivée ──
+  const il = d.inviteLogger;
+  if (!il.joinChannelId) return;
+
+  let usedInviter = null;
+  let usedCode = null;
+  let totalInvites = 0;
+
+  try {
+    const newInvites = await member.guild.invites.fetch();
+    newInvites.forEach(inv => {
+      const cached = il.inviteCache[inv.code];
+      if (cached && inv.uses > cached.uses) {
+        usedInviter = cached;
+        usedCode = inv.code;
+        totalInvites = inv.uses;
+      }
+    });
+    // Rafraîchir le cache
+    il.inviteCache = {};
+    newInvites.forEach(inv => {
+      il.inviteCache[inv.code] = {
+        uses: inv.uses,
+        inviterId: inv.inviter?.id || null,
+        inviterTag: inv.inviter?.username || 'Inconnu',
+        inviterMention: inv.inviter ? `<@${inv.inviter.id}>` : 'Inconnu',
+      };
+    });
+  } catch {}
+
+  const joinCh = member.guild.channels.cache.get(il.joinChannelId);
+  if (!joinCh) return;
+
+  const memberCount = member.guild.memberCount;
+  const accountAge = Math.floor((Date.now() - member.user.createdTimestamp) / 86400000);
+
+  const joinEmbed = new EmbedBuilder()
+    .setTitle('💋 Nouveau membre')
+    .setDescription(
+      `${member} vient de rejoindre le serveur !\n\n` +
+      `**👤 Compte créé il y a :** ${accountAge} jour(s)\n` +
+      `**💌 Invité par :** ${usedInviter ? usedInviter.inviterMention : '`Lien inconnu`'}\n` +
+      `**🔗 Code utilisé :** ${usedCode ? `\`${usedCode}\`` : '`inconnu`'}\n` +
+      `**📊 Total invites de l'inviteur :** ${usedInviter ? totalInvites : '–'}\n` +
+      `**👥 Membres du serveur :** ${memberCount}`
+    )
+    .setColor(0xff69b4)
+    .setThumbnail(member.user.displayAvatarURL({ dynamic: true }))
+    .setFooter({ text: '💋 Mayssa • Bienvenue !' })
+    .setTimestamp();
+
+  try { await joinCh.send({ embeds: [joinEmbed] }); } catch {}
+});
+
+// ══════════════════════════════════════════════
+//  GUILDMEMBERREMOVE — Invite Logger départ
+// ══════════════════════════════════════════════
+client.on(Events.GuildMemberRemove, async member => {
+  const gId = member.guild.id;
+  const d = getGuild(gId);
+  const il = d.inviteLogger;
+
+  // ── LOG KICK (audit log) ──
+  try {
+    await new Promise(r => setTimeout(r, 1000));
+    const logs = await member.guild.fetchAuditLogs({ type: AuditLogEvent.MemberKick, limit: 1 });
+    const entry = logs.entries.first();
+    if (entry && entry.target?.id === member.id && Date.now() - entry.createdTimestamp < 5000) {
+      const logEmbed = new EmbedBuilder()
+        .setTitle('👢 Membre Kické')
+        .setDescription(`**Membre :** ${member.user.tag}\n**Par :** ${entry.executor?.tag}\n**Raison :** ${entry.reason || 'Non précisée'}`)
+        .setColor(0xff8800).setTimestamp();
+      await sendLog(member.guild, 'advanced', logEmbed);
+      await sendLog(member.guild, 'sanctions', logEmbed);
+    }
+  } catch {}
+
+  // ── INVITE LOGGER : départ ──
+  if (!il.leaveChannelId) return;
+  const leaveCh = member.guild.channels.cache.get(il.leaveChannelId);
+  if (!leaveCh) return;
+
+  const memberCount = member.guild.memberCount;
+  const leaveEmbed = new EmbedBuilder()
+    .setTitle('💔 Membre parti')
+    .setDescription(
+      `**${member.user.username}** vient de quitter le serveur...\n\n` +
+      `**👥 Membres restants :** ${memberCount}`
+    )
+    .setColor(0x555555)
+    .setThumbnail(member.user.displayAvatarURL({ dynamic: true }))
+    .setFooter({ text: '💋 Mayssa • Au revoir 🖤' })
+    .setTimestamp();
+
+  try { await leaveCh.send({ embeds: [leaveEmbed] }); } catch {}
+});
+
+// ══════════════════════════════════════════════
+//  EVENT: INTERACTION
 // ══════════════════════════════════════════════
 client.on(Events.InteractionCreate, async interaction => {
   const gId = interaction.guildId;
   if (!gId) return;
   const d = getGuild(gId);
 
-  // ── SELECT MENU : ouverture ticket ──────────
+  // ── SELECT MENU : ouverture ticket ──
   if (interaction.isStringSelectMenu() && interaction.customId === 'ticket_open') {
     await interaction.deferReply({ ephemeral: true });
     const selId = interaction.values[0];
     const sel = d.panel.selections.find(s => s.id === selId);
     if (!sel) return interaction.editReply({ content: '❌ Option introuvable.' });
 
-    // Vérif si ticket déjà ouvert par cet user
     const existing = Object.entries(d.tickets).find(([, t]) => t.userId === interaction.user.id);
     if (existing) {
       const ch = interaction.guild.channels.cache.get(existing[0]);
       return interaction.editReply({ content: `❌ Tu as déjà un ticket ouvert : ${ch ? ch.toString() : '#ticket-supprimé'}` });
     }
 
-    // Catégorie du ticket
     let parentId = sel.categoryId || null;
-
-    // Création du channel
     const ticketName = `💋・${selId}-${interaction.user.username}`.slice(0, 100);
     const overwrites = [
       { id: interaction.guild.roles.everyone, deny: [PermissionFlagsBits.ViewChannel] },
@@ -389,7 +624,6 @@ client.on(Events.InteractionCreate, async interaction => {
 
     d.tickets[ticketChannel.id] = { userId: interaction.user.id, claimedBy: null, selectionId: selId };
 
-    // Embed d'accueil
     const embed = new EmbedBuilder()
       .setTitle(`💋 Ticket — ${sel.label}`)
       .setDescription(`Bienvenue ${interaction.user} !\n\n*${sel.description}*\n\nUn membre de l'équipe va te répondre bientôt. 💋`)
@@ -402,13 +636,10 @@ client.on(Events.InteractionCreate, async interaction => {
       new ButtonBuilder().setCustomId('ticket_close').setLabel('🔒 Fermer').setStyle(ButtonStyle.Danger),
     );
 
-    let pingMsg = '';
-    if (sel.pingRoleId) pingMsg = `<@&${sel.pingRoleId}>`;
-
+    let pingMsg = sel.pingRoleId ? `<@&${sel.pingRoleId}>` : '';
     await ticketChannel.send({ content: pingMsg, embeds: [embed], components: [claimRow] });
     await interaction.editReply({ content: `✅ Ton ticket a été ouvert : ${ticketChannel}` });
 
-    // Log
     const logEmbed = new EmbedBuilder()
       .setTitle('🎫 Nouveau Ticket Ouvert')
       .setDescription(`**Utilisateur :** ${interaction.user} (${interaction.user.id})\n**Raison :** ${sel.label}\n**Salon :** ${ticketChannel}`)
@@ -417,19 +648,16 @@ client.on(Events.InteractionCreate, async interaction => {
     return;
   }
 
-  // ── BOUTONS TICKET ──────────────────────────
+  // ── BOUTONS TICKET ──
   if (interaction.isButton()) {
     const cId = interaction.customId;
 
-    // CLAIM
     if (cId === 'ticket_claim' || cId === 'ticket_unclaim') {
       const ticket = d.tickets[interaction.channelId];
       if (!ticket) return interaction.reply({ content: '❌ Ce salon n\'est pas un ticket.', ephemeral: true });
-
       if (!canClaimTicket(gId, interaction.member, ticket.selectionId)) {
         return interaction.reply({ content: '❌ Tu n\'as pas la permission de claim ce ticket.', ephemeral: true });
       }
-
       if (cId === 'ticket_claim') {
         ticket.claimedBy = interaction.user.id;
         const row = new ActionRowBuilder().addComponents(
@@ -450,7 +678,6 @@ client.on(Events.InteractionCreate, async interaction => {
       return;
     }
 
-    // CLOSE (bouton)
     if (cId === 'ticket_close') {
       const ticket = d.tickets[interaction.channelId];
       if (!ticket) return interaction.reply({ content: '❌ Ce salon n\'est pas un ticket.', ephemeral: true });
@@ -475,7 +702,6 @@ client.on(Events.InteractionCreate, async interaction => {
       return;
     }
 
-    // RULE ACCEPT
     if (cId.startsWith('rule_accept_')) {
       const roleId = cId.replace('rule_accept_', '');
       try {
@@ -488,11 +714,11 @@ client.on(Events.InteractionCreate, async interaction => {
     }
   }
 
-  // ── SLASH COMMANDS ──────────────────────────
+  // ── SLASH COMMANDS ──
   if (!interaction.isChatInputCommand()) return;
   const { commandName } = interaction;
 
-  // ════ OWNER COMMANDS ════
+  // ════ OWNER ════
   if (commandName === 'addown') {
     if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
     const user = interaction.options.getUser('user');
@@ -516,7 +742,7 @@ client.on(Events.InteractionCreate, async interaction => {
     return interaction.reply({ embeds: [embed], ephemeral: true });
   }
 
-  // ════ PANEL COMMANDS ════
+  // ════ PANEL ════
   if (commandName === 'paneltitle') {
     if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
     d.panel.title = interaction.options.getString('titre');
@@ -577,7 +803,7 @@ client.on(Events.InteractionCreate, async interaction => {
     return interaction.reply({ content: '✅ Panel envoyé !', ephemeral: true });
   }
 
-  // ════ TICKET COMMANDS ════
+  // ════ TICKET ════
   if (commandName === 'add') {
     if (!isManager(gId, interaction.member)) return interaction.reply({ content: '❌ Permission insuffisante.', ephemeral: true });
     const ticket = d.tickets[interaction.channelId];
@@ -661,7 +887,7 @@ client.on(Events.InteractionCreate, async interaction => {
     return;
   }
 
-  // ════ SETUP COMMANDS ════
+  // ════ SETUP ════
   if (commandName === 'addmanagerole') {
     if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
     const role = interaction.options.getRole('role');
@@ -731,10 +957,9 @@ client.on(Events.InteractionCreate, async interaction => {
     if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
     const role = interaction.options.getRole('role');
     if (!d.antiLink.gifOnlyBypassRoles.includes(role.id)) d.antiLink.gifOnlyBypassRoles.push(role.id);
-    return interaction.reply({ content: `✅ ${role} peut envoyer des GIFs uniquement (pas de liens externes).`, ephemeral: true });
+    return interaction.reply({ content: `✅ ${role} peut envoyer des GIFs uniquement.`, ephemeral: true });
   }
 
-  // ════ LOCKDOWN ════
   if (commandName === 'lockdown') {
     if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
     const action = interaction.options.getString('action');
@@ -795,32 +1020,150 @@ client.on(Events.InteractionCreate, async interaction => {
     if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
     const message = interaction.options.getString('message').replace(/\\n/g, '\n');
     const role = interaction.options.getRole('role');
-
     const embed = new EmbedBuilder()
       .setTitle('📜 Règlement — Mayssa')
       .setDescription(message)
       .setColor(0x2b0a2b)
       .setFooter({ text: 'Clique sur le bouton ci-dessous pour valider et obtenir l\'accès 💋' })
       .setTimestamp();
-
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId(`rule_accept_${role.id}`)
         .setLabel('✅ J\'accepte le règlement')
         .setStyle(ButtonStyle.Success)
     );
-
     await interaction.channel.send({ embeds: [embed], components: [row] });
     return interaction.reply({ content: `✅ Règlement envoyé. Le rôle ${role} sera attribué après validation.`, ephemeral: true });
+  }
+
+  // ════ ROLEMEMBER ════
+  if (commandName === 'rolemember') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+    const role = interaction.options.getRole('role');
+
+    // Sauvegarder pour les nouveaux arrivants
+    d.autoRoleId = role.id;
+
+    await interaction.deferReply({ ephemeral: true });
+
+    // Donner le rôle à tous les membres existants
+    let success = 0;
+    let fail = 0;
+    try {
+      const members = await interaction.guild.members.fetch();
+      for (const [, member] of members) {
+        if (member.user.bot) continue;
+        if (member.roles.cache.has(role.id)) continue;
+        try {
+          await member.roles.add(role.id);
+          success++;
+          // Petite pause pour éviter le rate-limit Discord
+          if (success % 10 === 0) await new Promise(r => setTimeout(r, 1000));
+        } catch { fail++; }
+      }
+    } catch (e) {
+      return interaction.editReply({ content: `❌ Erreur lors du fetch des membres : ${e.message}` });
+    }
+
+    return interaction.editReply({
+      content: `✅ Rôle ${role} attribué à **${success}** membre(s).\n${fail > 0 ? `⚠️ Échec pour **${fail}** membre(s).\n` : ''}💋 Ce rôle sera aussi donné automatiquement aux nouveaux arrivants.`,
+    });
+  }
+
+  // ════ SAY ════
+  if (commandName === 'say') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+
+    const salon = interaction.options.getChannel('salon');
+    const messageText = interaction.options.getString('message').replace(/\\n/g, '\n');
+    const style = interaction.options.getString('style');
+    const titre = interaction.options.getString('titre') || null;
+    const couleurHex = interaction.options.getString('couleur') || null;
+
+    // Vérif que le salon est un text channel
+    if (![ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(salon.type)) {
+      return interaction.reply({ content: '❌ Le salon doit être un salon textuel.', ephemeral: true });
+    }
+
+    // Parser la couleur
+    let color = 0xff69b4; // rose NSFW par défaut
+    if (couleurHex) {
+      const parsed = parseInt(couleurHex.replace('#', ''), 16);
+      if (!isNaN(parsed)) color = parsed;
+    }
+
+    try {
+      if (style === 'embed') {
+        const embed = new EmbedBuilder()
+          .setDescription(messageText)
+          .setColor(color)
+          .setFooter({ text: '💋 Mayssa' })
+          .setTimestamp();
+        if (titre) embed.setTitle(titre);
+
+        await salon.send({ embeds: [embed] });
+      } else {
+        await salon.send({ content: messageText });
+      }
+      return interaction.reply({ content: `✅ Message envoyé dans ${salon} !`, ephemeral: true });
+    } catch (e) {
+      return interaction.reply({ content: `❌ Impossible d'envoyer dans ce salon : ${e.message}`, ephemeral: true });
+    }
+  }
+
+  // ════ INVITE LOGGER ════
+  if (commandName === 'invitelogger') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+    const action = interaction.options.getString('action');
+    const salon = interaction.options.getChannel('salon');
+    const il = d.inviteLogger;
+
+    if (action === 'setjoin') {
+      if (!salon) return interaction.reply({ content: '❌ Précise un salon.', ephemeral: true });
+      il.joinChannelId = salon.id;
+      return interaction.reply({ content: `✅ Salon d'arrivée défini : ${salon} 💋`, ephemeral: true });
+    }
+
+    if (action === 'setleave') {
+      if (!salon) return interaction.reply({ content: '❌ Précise un salon.', ephemeral: true });
+      il.leaveChannelId = salon.id;
+      return interaction.reply({ content: `✅ Salon de départ défini : ${salon} 🖤`, ephemeral: true });
+    }
+
+    if (action === 'enable') {
+      await interaction.deferReply({ ephemeral: true });
+      try {
+        await cacheInvites(interaction.guild);
+        return interaction.editReply({ content: `✅ Cache d'invites rechargé ! **${Object.keys(il.inviteCache).length}** invite(s) en mémoire.` });
+      } catch (e) {
+        return interaction.editReply({ content: `❌ Erreur : ${e.message}` });
+      }
+    }
+
+    if (action === 'status') {
+      const joinCh = il.joinChannelId ? `<#${il.joinChannelId}>` : '`Non défini`';
+      const leaveCh = il.leaveChannelId ? `<#${il.leaveChannelId}>` : '`Non défini`';
+      const cacheSize = Object.keys(il.inviteCache).length;
+      const embed = new EmbedBuilder()
+        .setTitle('💋 Invite Logger — Config')
+        .setDescription(
+          `**Salon arrivées :** ${joinCh}\n` +
+          `**Salon départs :** ${leaveCh}\n` +
+          `**Invites en cache :** ${cacheSize}`
+        )
+        .setColor(0xff69b4)
+        .setFooter({ text: 'Mayssa • Call me Mayssa 💋' });
+      return interaction.reply({ embeds: [embed], ephemeral: true });
+    }
   }
 });
 
 // ══════════════════════════════════════════════
-//  ANTI-LIEN — MessageCreate
+//  ANTI-LIEN + ANTI-SPAM — MessageCreate
 // ══════════════════════════════════════════════
 const LINK_REGEX = /https?:\/\/[^\s]+|discord\.gg\/[^\s]+|discord\.com\/invite\/[^\s]+/gi;
 const GIF_ONLY_ALLOWED = /tenor\.com|giphy\.com|media\.discordapp\.net.*\.gif|cdn\.discordapp\.com.*\.gif/i;
-const SPAM_THRESHOLD = 5; // msgs en 4 secondes
+const SPAM_THRESHOLD = 5;
 const SPAM_WINDOW    = 4000;
 
 client.on(Events.MessageCreate, async message => {
@@ -830,7 +1173,6 @@ client.on(Events.MessageCreate, async message => {
   const member = message.member;
   if (!member) return;
 
-  // ── ANTI-SPAM ──
   const uid = message.author.id;
   const now = Date.now();
   if (!d.antiSpam.userMessages[uid]) d.antiSpam.userMessages[uid] = [];
@@ -840,7 +1182,6 @@ client.on(Events.MessageCreate, async message => {
   if (d.antiSpam.userMessages[uid].length >= SPAM_THRESHOLD) {
     if (!d.whitelist.includes(uid) && !isOwner(gId, uid)) {
       try {
-        // Supprimer les messages en rafale
         const msgs = await message.channel.messages.fetch({ limit: 10 });
         const toDelete = msgs.filter(m => m.author.id === uid);
         await message.channel.bulkDelete(toDelete, true);
@@ -856,7 +1197,6 @@ client.on(Events.MessageCreate, async message => {
     }
   }
 
-  // ── ANTI-MENTION MASSIVE ──
   const mentionCount = (message.content.match(/<@[!&]?\d+>/g) || []).length;
   const hasMassMention = message.mentions.everyone || mentionCount >= 5;
   if (hasMassMention && !d.whitelist.includes(uid) && !isOwner(gId, uid)) {
@@ -872,23 +1212,18 @@ client.on(Events.MessageCreate, async message => {
     return;
   }
 
-  // ── ANTI-LIEN ──
   if (d.antiLink.enabled && LINK_REGEX.test(message.content)) {
     LINK_REGEX.lastIndex = 0;
-    // Bypass total
     const hasFullBypass = d.antiLink.fullBypassRoles.some(rId => member.roles.cache.has(rId));
     if (hasFullBypass) return;
 
-    // Bypass gif seulement
     const hasGifBypass = d.antiLink.gifOnlyBypassRoles.some(rId => member.roles.cache.has(rId));
     if (hasGifBypass) {
-      // Vérif que tous les liens sont des gifs autorisés
       const links = message.content.match(LINK_REGEX) || [];
       const allGifsOk = links.every(l => GIF_ONLY_ALLOWED.test(l));
       if (allGifsOk) return;
     }
 
-    // Pas de bypass : suppr + timeout
     if (!d.whitelist.includes(uid) && !isOwner(gId, uid)) {
       try {
         await message.delete();
@@ -905,109 +1240,11 @@ client.on(Events.MessageCreate, async message => {
       } catch {}
     }
   }
-
-  // ── MESSAGES RÉPÉTÉS ──
-  const recentSame = d.antiSpam.userMessages[uid] &&
-    d.antiSpam.userMessages[uid].length >= 3;
-  // (déjà géré par le threshold général, pas besoin de double-check)
 });
 
 // ══════════════════════════════════════════════
-//  ANTI-RAID — GuildMemberAdd
+//  PROTECTION SERVEUR — Audit Log + Backups
 // ══════════════════════════════════════════════
-const RAID_THRESHOLDS = [
-  { count: 10, window: 10000, action: 'warn' },
-  { count: 20, window: 15000, action: 'quarantine' },
-  { count: 50, window: 20000, action: 'lockdown' },
-];
-
-client.on(Events.GuildMemberAdd, async member => {
-  const gId = member.guild.id;
-  const d = getGuild(gId);
-  if (!d.antiRaid.enabled) return;
-
-  const now = Date.now();
-  d.antiRaid.joinTimestamps.push(now);
-  d.antiRaid.joinTimestamps = d.antiRaid.joinTimestamps.filter(t => now - t < 20000);
-
-  // Vérif bots
-  if (member.user.bot) {
-    try {
-      await member.kick('Anti-bot : ajout de bot non autorisé');
-      const logEmbed = new EmbedBuilder()
-        .setTitle('🤖 Bot Kické')
-        .setDescription(`**Bot :** ${member.user.tag} (${member.id})`)
-        .setColor(0xff0000).setTimestamp();
-      await sendLog(member.guild, 'antibot', logEmbed);
-    } catch {}
-    return;
-  }
-
-  // Compte récent (< 7 jours)
-  const accountAge = Date.now() - member.user.createdTimestamp;
-  const sevenDays = 7 * 24 * 60 * 60 * 1000;
-  if (accountAge < sevenDays) {
-    const logEmbed = new EmbedBuilder()
-      .setTitle('🤖 Compte Récent Détecté')
-      .setDescription(`**Membre :** ${member.user.tag}\n**Créé il y a :** ${Math.floor(accountAge / 86400000)} jour(s)`)
-      .setColor(0xffaa00).setTimestamp();
-    await sendLog(member.guild, 'antibot', logEmbed);
-  }
-
-  const joinCount = d.antiRaid.joinTimestamps.length;
-
-  for (const threshold of RAID_THRESHOLDS.reverse()) {
-    const recent = d.antiRaid.joinTimestamps.filter(t => now - t < threshold.window).length;
-    if (recent >= threshold.count) {
-      if (threshold.action === 'lockdown' && !d.antiRaid.locked) {
-        d.antiRaid.locked = true;
-        try {
-          const channels = member.guild.channels.cache.filter(c => c.type === ChannelType.GuildText);
-          for (const [, ch] of channels) {
-            try {
-              await ch.permissionOverwrites.edit(member.guild.roles.everyone, { SendMessages: false });
-            } catch {}
-          }
-        } catch {}
-        const logEmbed = new EmbedBuilder()
-          .setTitle('🚨 ANTI-RAID : LOCKDOWN AUTOMATIQUE')
-          .setDescription(`**${recent} membres** ont rejoint en ${threshold.window / 1000}s.\nServeur verrouillé automatiquement.`)
-          .setColor(0xff0000).setTimestamp();
-        await sendLog(member.guild, 'antiraid', logEmbed);
-      } else if (threshold.action === 'quarantine') {
-        d.antiRaid.quarantinedUsers.push(member.id);
-        try {
-          await member.timeout(600000, 'Anti-raid : arrivée massive');
-        } catch {}
-        const logEmbed = new EmbedBuilder()
-          .setTitle('🛡️ ANTI-RAID : Quarantaine')
-          .setDescription(`**Membre :** ${member.user.tag}\n**${recent} membres** ont rejoint récemment.`)
-          .setColor(0xff8800).setTimestamp();
-        await sendLog(member.guild, 'antiraid', logEmbed);
-      } else {
-        const logEmbed = new EmbedBuilder()
-          .setTitle('⚠️ ANTI-RAID : Alerte Joins')
-          .setDescription(`**${recent} membres** ont rejoint en ${threshold.window / 1000}s.`)
-          .setColor(0xffff00).setTimestamp();
-        await sendLog(member.guild, 'antiraid', logEmbed);
-      }
-      break;
-    }
-  }
-  RAID_THRESHOLDS.reverse(); // remettre dans l'ordre
-});
-
-// ══════════════════════════════════════════════
-//  PROTECTION SERVEUR — Audit Log Events
-// ══════════════════════════════════════════════
-
-// Backup des channels à la connexion
-client.on(Events.ClientReady, () => {
-  for (const [, guild] of client.guilds.cache) {
-    backupChannels(guild);
-  }
-});
-
 function backupChannels(guild) {
   const d = getGuild(guild.id);
   d.channelBackup = {};
@@ -1023,7 +1260,6 @@ function backupChannels(guild) {
   }
 }
 
-// Suppression de salon
 client.on(Events.ChannelDelete, async channel => {
   if (!channel.guild) return;
   const gId = channel.guild.id;
@@ -1031,7 +1267,6 @@ client.on(Events.ChannelDelete, async channel => {
   const backup = d.channelBackup[channel.id];
   if (!backup) return;
 
-  // Récupérer qui a supprimé via audit log
   let deletedBy = null;
   try {
     await new Promise(r => setTimeout(r, 1000));
@@ -1048,7 +1283,6 @@ client.on(Events.ChannelDelete, async channel => {
     .setColor(0xff4444).setTimestamp();
   await sendLog(channel.guild, 'protection', logEmbed);
 
-  // Restaurer si ce n'est pas le bot ou whitelist
   if (deletedBy && !d.whitelist.includes(deletedBy.id) && !isOwner(gId, deletedBy.id)) {
     try {
       await channel.guild.channels.create({
@@ -1068,12 +1302,10 @@ client.on(Events.ChannelDelete, async channel => {
   delete d.channelBackup[channel.id];
 });
 
-// Mise à jour backup à la création
 client.on(Events.ChannelCreate, async channel => {
   if (!channel.guild) return;
   const d = getGuild(channel.guild.id);
 
-  // Détecter création massive
   const now = Date.now();
   if (!d._channelCreateTimestamps) d._channelCreateTimestamps = [];
   d._channelCreateTimestamps = d._channelCreateTimestamps.filter(t => now - t < 10000);
@@ -1098,8 +1330,6 @@ client.on(Events.ChannelCreate, async channel => {
 // ══════════════════════════════════════════════
 //  LOGS AVANCÉS
 // ══════════════════════════════════════════════
-
-// Ban
 client.on(Events.GuildBanAdd, async ban => {
   const logEmbed = new EmbedBuilder()
     .setTitle('🔨 Membre Banni')
@@ -1109,24 +1339,6 @@ client.on(Events.GuildBanAdd, async ban => {
   await sendLog(ban.guild, 'sanctions', logEmbed);
 });
 
-// Kick (via audit log sur member remove)
-client.on(Events.GuildMemberRemove, async member => {
-  try {
-    await new Promise(r => setTimeout(r, 1000));
-    const logs = await member.guild.fetchAuditLogs({ type: AuditLogEvent.MemberKick, limit: 1 });
-    const entry = logs.entries.first();
-    if (entry && entry.target?.id === member.id && Date.now() - entry.createdTimestamp < 5000) {
-      const logEmbed = new EmbedBuilder()
-        .setTitle('👢 Membre Kické')
-        .setDescription(`**Membre :** ${member.user.tag}\n**Par :** ${entry.executor?.tag}\n**Raison :** ${entry.reason || 'Non précisée'}`)
-        .setColor(0xff8800).setTimestamp();
-      await sendLog(member.guild, 'advanced', logEmbed);
-      await sendLog(member.guild, 'sanctions', logEmbed);
-    }
-  } catch {}
-});
-
-// Modification de rôle
 client.on(Events.GuildRoleUpdate, async (oldRole, newRole) => {
   const logEmbed = new EmbedBuilder()
     .setTitle('✏️ Rôle Modifié')
@@ -1135,7 +1347,6 @@ client.on(Events.GuildRoleUpdate, async (oldRole, newRole) => {
   await sendLog(newRole.guild, 'advanced', logEmbed);
 });
 
-// Timeout (member update)
 client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
   const wasTimedOut = !oldMember.communicationDisabledUntil && newMember.communicationDisabledUntil;
   if (wasTimedOut) {
@@ -1148,7 +1359,7 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
 });
 
 // ══════════════════════════════════════════════
-//  EXPRESS KEEPALIVE — Render
+//  EXPRESS KEEPALIVE
 // ══════════════════════════════════════════════
 const app = express();
 
@@ -1165,7 +1376,6 @@ app.listen(PORT, () => {
   console.log(`🌐 Serveur keepalive sur le port ${PORT}`);
 });
 
-// Self-ping toutes les 2 minutes (silence Render)
 const PING_URL = RENDER_URL || 'https://nsfw-bot-p9u8.onrender.com';
 setInterval(async () => {
   try {
@@ -1174,9 +1384,9 @@ setInterval(async () => {
   } catch (e) {
     console.warn('⚠️ Self-ping failed:', e.message);
   }
-}, 2 * 60 * 1000); // 2 minutes
+}, 2 * 60 * 1000);
 
 // ══════════════════════════════════════════════
 //  LOGIN
 // ══════════════════════════════════════════════
-client.login(TOKEN);
+client.login(TOKEN)

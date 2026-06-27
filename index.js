@@ -9,6 +9,14 @@
 //          (salon supprimé manuellement sans passer par /close ou /delete)
 //  + AJOUT : /setcategoryboost (salon des remerciements de boost)
 //          + /setcategorywelcome (salon des messages de bienvenue)
+//  + FIX (mise à jour) : auto-récupération des tickets "orphelins"
+//          (le salon existe toujours sur Discord mais le bot avait perdu
+//          la référence, typiquement après un redémarrage sans disque
+//          persistant côté hébergeur) → /close, /delete etc. refonctionnent
+//          automatiquement, et /fixtickets peut forcer la réparation à tout moment.
+//  + SIMPLIFICATION : une seule catégorie de ticket pour tout le serveur,
+//          réglable via la seule commande /setticketcategory (sélecteur Discord,
+//          ne montre que des catégories, donc plus d'erreur d'ID).
 // ============================================================
 
 const {
@@ -16,7 +24,7 @@ const {
   EmbedBuilder, ActionRowBuilder, StringSelectMenuBuilder,
   ButtonBuilder, ButtonStyle, PermissionFlagsBits,
   ChannelType, REST, Routes, SlashCommandBuilder,
-  Events, AuditLogEvent, time
+  Events, AuditLogEvent, time, OverwriteType
 } = require('discord.js');
 const express = require('express');
 const fetch = require('node-fetch');
@@ -32,6 +40,10 @@ const GUILD_ID         = process.env.GUILD_ID  || '1515771169138147448';
 const RENDER_URL       = process.env.RENDER_EXTERNAL_URL;
 
 const OWNER_IDS_DEFAULT = ['207283656203436042', '685679698054742017'];
+
+// Préfixe utilisé pour TOUS les salons de ticket créés par le bot.
+// Sert aussi à reconnaître/retrouver un salon de ticket (voir syncTickets()).
+const TICKET_PREFIX = '💋・';
 
 // Fichier de sauvegarde persistante (hardcodé, pas besoin de DB externe)
 const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, 'data', 'guildData.json');
@@ -55,13 +67,14 @@ function getGuild(guildId) {
         title: '🦋 • SUPPORT TICKET • 🦋',
         description: '♡ ••••• ♡\n\n*• Tu as envie de commander une prestation de Mayssa ? Une question ? Ou autre ?*\n\n💋 **Ouvre un ticket parmis les options suivantes :**',
         selections: [
-          { id: 'prestations', label: '• PRESTATIONS • 💋', description: 'Commande mes services ici !',       pingRoleId: null, categoryId: null, extraRoleIds: [] },
-          { id: 'questions',   label: '• QUESTIONS • 💋',   description: 'Des questions / demandes ?',        pingRoleId: null, categoryId: null, extraRoleIds: [] },
-          { id: 'partenariat', label: '• PARTENARIAT • 💋', description: 'Tu souhaites faire un partenariat avec Mayssa ?', pingRoleId: null, categoryId: null, extraRoleIds: [] },
-          { id: 'reports',     label: '• RECOMPENSE BOOSTS • 💋',     description: 'Pour réclamer tes récompenses de boosts',       pingRoleId: null , categoryId: null, extraRoleIds: [] },
-          { id: 'autres',      label: '• AUTRES • 💋',      description: 'Aborde un autre sujet ici !',       pingRoleId: null, categoryId: null, extraRoleIds: [] },
+          { id: 'prestations', label: '• PRESTATIONS • 💋', description: 'Commande mes services ici !',       pingRoleId: null, extraRoleIds: [] },
+          { id: 'questions',   label: '• QUESTIONS • 💋',   description: 'Des questions / demandes ?',        pingRoleId: null, extraRoleIds: [] },
+          { id: 'partenariat', label: '• PARTENARIAT • 💋', description: 'Tu souhaites faire un partenariat avec Mayssa ?', pingRoleId: null, extraRoleIds: [] },
+          { id: 'reports',     label: '• RECOMPENSE BOOSTS • 💋',     description: 'Pour réclamer tes récompenses de boosts',       pingRoleId: null , extraRoleIds: [] },
+          { id: 'autres',      label: '• AUTRES • 💋',      description: 'Aborde un autre sujet ici !',       pingRoleId: null, extraRoleIds: [] },
         ],
-        // ── CATÉGORIE PAR DÉFAUT pour tous les tickets ──
+        // ── CATÉGORIE UNIQUE pour tous les tickets, quelle que soit la sélection ──
+        // Réglable uniquement via /setticketcategory (voir plus bas).
         defaultCategoryId: null,
       },
 
@@ -156,6 +169,13 @@ function loadData() {
         if (!guildData[gId].panel) guildData[gId].panel = {};
         if (guildData[gId].panel.defaultCategoryId === undefined) {
           guildData[gId].panel.defaultCategoryId = null;
+        }
+        // Migration : on supprime l'ancien système de catégorie PAR SÉLECTION
+        // (remplacé par une seule catégorie globale, réglée via /setticketcategory)
+        if (Array.isArray(guildData[gId].panel.selections)) {
+          for (const sel of guildData[gId].panel.selections) {
+            if (sel && typeof sel === 'object') delete sel.categoryId;
+          }
         }
       }
       console.log(`💾 Données restaurées depuis le disque (${Object.keys(parsed).length} serveur(s)).`);
@@ -323,6 +343,73 @@ async function cacheInvites(guild) {
 }
 
 // ──────────────────────────────────────────────
+//  SYNC TICKETS — Nettoyage + Auto-récupération
+//  • Nettoie les références de tickets dont le salon a été supprimé
+//    manuellement (sans passer par /close ou /delete) → "tickets fantômes".
+//  • Retrouve les salons de ticket qui existent TOUJOURS sur Discord mais
+//    dont la référence a été perdue côté bot → "tickets orphelins".
+//    C'est typiquement ce qui arrive après un redémarrage / redeploiement
+//    si l'hébergeur (ex: Render sans disque persistant) n'a pas conservé
+//    le fichier de sauvegarde. Sans ce correctif, /close, /delete, /add,
+//    /remove répondent "Ce salon n'est pas un ticket" même si le salon
+//    EST bien un ticket toujours ouvert.
+//    Appelée automatiquement au démarrage du bot, et manuellement via
+//    la commande /fixtickets.
+// ──────────────────────────────────────────────
+async function syncTickets(guild) {
+  const d = getGuild(guild.id);
+  let cleaned = 0;
+  let recovered = 0;
+
+  // 1) Tickets fantômes : référence en mémoire, salon introuvable sur Discord
+  for (const chId of Object.keys(d.tickets)) {
+    if (!guild.channels.cache.has(chId)) {
+      delete d.tickets[chId];
+      cleaned++;
+    }
+  }
+
+  // 2) Tickets orphelins : salon présent sur Discord, référence absente côté bot
+  const ticketChannels = guild.channels.cache.filter(
+    c => c.type === ChannelType.GuildText && c.name && c.name.startsWith(TICKET_PREFIX)
+  );
+
+  for (const [chId, ch] of ticketChannels) {
+    if (d.tickets[chId]) continue; // déjà connu, rien à faire
+
+    // Retrouve la sélection d'origine via le préfixe du nom du salon
+    // (format de création : 💋・<id-selection>-<pseudo>)
+    let selectionId = null;
+    for (const sel of d.panel.selections) {
+      if (ch.name.startsWith(`${TICKET_PREFIX}${sel.id}-`)) {
+        selectionId = sel.id;
+        break;
+      }
+    }
+
+    // Retrouve le créateur du ticket via la première permission "membre"
+    // posée sur le salon (celle du créateur est ajoutée en premier à la création)
+    let userId = null;
+    try {
+      for (const [, overwrite] of ch.permissionOverwrites.cache) {
+        if (overwrite.type === OverwriteType.Member && overwrite.id !== client.user.id) {
+          userId = overwrite.id;
+          break;
+        }
+      }
+    } catch {}
+
+    if (userId) {
+      d.tickets[chId] = { userId, claimedBy: null, selectionId };
+      recovered++;
+    }
+  }
+
+  if (cleaned > 0 || recovered > 0) saveData();
+  return { cleaned, recovered };
+}
+
+// ──────────────────────────────────────────────
 //  BUILD TICKET PANEL
 // ──────────────────────────────────────────────
 function buildPanelComponents(guildId) {
@@ -392,12 +479,6 @@ const commands = [
   new SlashCommandBuilder().setName('panelsetpingrole').setDescription('Définir le rôle pingé pour une raison')
     .addStringOption(o => o.setName('id').setDescription('ID de la sélection').setRequired(true))
     .addRoleOption(o => o.setName('role').setDescription('Rôle à pinger').setRequired(true)),
-  new SlashCommandBuilder().setName('panelsetcategory').setDescription('Définir la catégorie pour une raison (sélecteur Discord)')
-    .addStringOption(o => o.setName('id').setDescription('ID de la sélection').setRequired(true))
-    .addChannelOption(o => o.setName('categorie').setDescription('Catégorie').setRequired(true)),
-  new SlashCommandBuilder().setName('panelsetcategoryid').setDescription('Définir la catégorie d\'une raison via son ID brut')
-    .addStringOption(o => o.setName('id').setDescription('ID de la sélection').setRequired(true))
-    .addStringOption(o => o.setName('categorie_id').setDescription('ID Discord de la catégorie').setRequired(true)),
   new SlashCommandBuilder().setName('paneladdrole').setDescription('Donner à un rôle l\'accès aux tickets d\'une sélection')
     .addStringOption(o => o.setName('id').setDescription('ID de la sélection').setRequired(true))
     .addRoleOption(o => o.setName('role').setDescription('Rôle à autoriser').setRequired(true)),
@@ -408,20 +489,17 @@ const commands = [
     .addStringOption(o => o.setName('id').setDescription('ID de la sélection').setRequired(true)),
   new SlashCommandBuilder().setName('panel').setDescription('Envoyer le panel ticket dans ce salon'),
 
-  // ── CATÉGORIE PAR DÉFAUT DES TICKETS ──
-  // Permet de choisir dans quelle catégorie s'ouvrent les tickets
-  // quand la sélection choisie n'a pas de catégorie spécifique définie.
-  // Si aucune sélection et aucune catégorie par défaut → aucune catégorie (salon à la racine)
+  // ── CATÉGORIE DES TICKETS (UNE SEULE COMMANDE POUR TOUT LE SERVEUR) ──
+  // Choisis ici le salon/catégorie où TOUS les tickets s'ouvriront,
+  // quelle que soit la sélection choisie par le membre. Le sélecteur Discord
+  // ne propose QUE des catégories, donc impossible de se tromper d'ID.
   new SlashCommandBuilder().setName('setticketcategory')
-    .setDescription('Définir la catégorie par défaut où s\'ouvrent tous les tickets (via sélecteur)')
-    .addChannelOption(o => o.setName('categorie').setDescription('Catégorie Discord').setRequired(true)),
-  new SlashCommandBuilder().setName('setticketcategoryid')
-    .setDescription('Définir la catégorie par défaut des tickets via son ID brut')
-    .addStringOption(o => o.setName('categorie_id').setDescription('ID Discord de la catégorie').setRequired(true)),
+    .setDescription('Définir LA catégorie où s\'ouvriront tous les tickets (sélecteur Discord)')
+    .addChannelOption(o => o.setName('categorie').setDescription('Catégorie Discord').setRequired(true).addChannelTypes(ChannelType.GuildCategory)),
   new SlashCommandBuilder().setName('removeticketcategory')
-    .setDescription('Retirer la catégorie par défaut des tickets (ils s\'ouvriront à la racine)'),
+    .setDescription('Retirer la catégorie des tickets (ils s\'ouvriront à la racine du serveur)'),
   new SlashCommandBuilder().setName('ticketcategorystatus')
-    .setDescription('Voir la catégorie par défaut des tickets et la catégorie de chaque sélection'),
+    .setDescription('Voir la catégorie actuellement définie pour les tickets'),
 
   // ── TICKET ──
   new SlashCommandBuilder().setName('add').setDescription('Ajouter un membre au ticket')
@@ -516,13 +594,13 @@ const commands = [
   new SlashCommandBuilder().setName('setticketrole').setDescription('Définir le rôle qui peut voir TOUS les tickets')
     .addRoleOption(o => o.setName('role').setDescription('Rôle').setRequired(true)),
 
-  // ── FIX TICKETS FANTÔMES ──
-  // À utiliser quand un salon de ticket a été supprimé MANUELLEMENT (clic droit > Supprimer)
-  // au lieu de passer par /close ou /delete. Le bot garde alors en mémoire que l'utilisateur
-  // a "un ticket ouvert" alors que le salon n'existe plus, et le bloque pour en ouvrir un nouveau.
-  // Cette commande nettoie immédiatement toutes ces références fantômes.
+  // ── FIX TICKETS (FANTÔMES + ORPHELINS) ──
+  // À utiliser si un ticket ne répond plus normalement aux commandes de gestion
+  // (ex: "Ce salon n'est pas un ticket" après un redémarrage du bot), ou si un
+  // salon de ticket a été supprimé manuellement et bloque encore un membre.
+  // Cette commande répare les deux cas en une seule fois.
   new SlashCommandBuilder().setName('fixtickets')
-    .setDescription('Nettoyer les tickets fantômes (salons supprimés manuellement, débloque les utilisateurs concernés)'),
+    .setDescription('Réparer le système de tickets (nettoie les fantômes + retrouve les tickets perdus après un redémarrage)'),
 
   // ── DOG (laisse) ──
   new SlashCommandBuilder().setName('dog').setDescription('Mettre un membre en laisse')
@@ -572,21 +650,16 @@ client.once(Events.ClientReady, async () => {
     try { await cacheInvites(guild); } catch {}
     backupChannels(guild);
 
-    // ── FIX : NETTOYAGE DES TICKETS FANTÔMES AU DÉMARRAGE ──
-    // Si un salon de ticket a été supprimé manuellement pendant que le bot
-    // était hors-ligne (ou avant ce correctif), sa référence reste coincée
-    // dans d.tickets et bloque l'utilisateur. On la retire ici si le salon
-    // n'existe plus réellement sur le serveur.
-    const d = getGuild(guild.id);
-    let cleanedOnStart = 0;
-    for (const chId of Object.keys(d.tickets)) {
-      if (!guild.channels.cache.has(chId)) {
-        delete d.tickets[chId];
-        cleanedOnStart++;
-      }
-    }
-    if (cleanedOnStart > 0) {
-      console.log(`🧹 ${cleanedOnStart} ticket(s) fantôme(s) nettoyé(s) au démarrage sur ${guild.name}.`);
+    // ── FIX : SYNCHRONISATION DES TICKETS AU DÉMARRAGE ──
+    // Nettoie les tickets fantômes (salon supprimé manuellement) ET retrouve
+    // les tickets orphelins (salon toujours là, référence perdue côté bot —
+    // typiquement après un redémarrage si la sauvegarde disque n'a pas survécu).
+    try {
+      const { cleaned, recovered } = await syncTickets(guild);
+      if (cleaned > 0) console.log(`🧹 ${cleaned} ticket(s) fantôme(s) nettoyé(s) au démarrage sur ${guild.name}.`);
+      if (recovered > 0) console.log(`♻️ ${recovered} ticket(s) retrouvé(s) et re-synchronisé(s) au démarrage sur ${guild.name}.`);
+    } catch (e) {
+      console.error('❌ Erreur de synchronisation des tickets:', e.message);
     }
   }
 
@@ -861,13 +934,21 @@ client.on(Events.InteractionCreate, async interaction => {
       }
     }
 
-    // ── LOGIQUE DE RÉSOLUTION DE CATÉGORIE ──
-    // Priorité 1 : catégorie définie directement sur la sélection (/panelsetcategory ou /panelsetcategoryid)
-    // Priorité 2 : catégorie par défaut définie via /setticketcategory ou /setticketcategoryid
-    // Priorité 3 : aucune catégorie (salon créé à la racine du serveur)
-    let parentId = sel.categoryId || d.panel.defaultCategoryId || null;
+    // ── CATÉGORIE DU TICKET ──
+    // Une seule catégorie possible pour TOUS les tickets, réglée via /setticketcategory.
+    // Si aucune catégorie n'est définie → le salon est créé à la racine du serveur.
+    let parentId = d.panel.defaultCategoryId || null;
+    if (parentId) {
+      const parentCat = interaction.guild.channels.cache.get(parentId);
+      if (!parentCat || parentCat.type !== ChannelType.GuildCategory) {
+        // La catégorie enregistrée n'existe plus (supprimée, ou donnée invalide) :
+        // on ouvre le ticket à la racine plutôt que de bloquer complètement la création.
+        console.warn(`⚠️ Catégorie de ticket introuvable (${parentId}) sur ${interaction.guild.name}, ticket créé à la racine.`);
+        parentId = null;
+      }
+    }
 
-    const ticketName = `💋・${selId}-${interaction.user.username}`.slice(0, 100);
+    const ticketName = `${TICKET_PREFIX}${selId}-${interaction.user.username}`.slice(0, 100);
     const overwrites = [
       { id: interaction.guild.roles.everyone, deny: [PermissionFlagsBits.ViewChannel] },
       {
@@ -903,6 +984,7 @@ client.on(Events.InteractionCreate, async interaction => {
         permissionOverwrites: overwrites,
       });
     } catch (e) {
+      console.error('❌ Erreur création ticket:', e);
       return interaction.editReply({ content: '❌ Impossible de créer le ticket. Vérifie les permissions du bot.' });
     }
 
@@ -1047,7 +1129,7 @@ client.on(Events.InteractionCreate, async interaction => {
     const desc = interaction.options.getString('description');
     if (d.panel.selections.find(s => s.id === id)) return interaction.reply({ content: '⚠️ ID déjà existant.', ephemeral: true });
     if (d.panel.selections.length >= 25) return interaction.reply({ content: '❌ Maximum 25 options.', ephemeral: true });
-    d.panel.selections.push({ id, label, description: desc, pingRoleId: null, categoryId: null, extraRoleIds: [] });
+    d.panel.selections.push({ id, label, description: desc, pingRoleId: null, extraRoleIds: [] });
     saveData();
     return interaction.reply({ content: `✅ Sélection **${label}** ajoutée.`, ephemeral: true });
   }
@@ -1071,33 +1153,6 @@ client.on(Events.InteractionCreate, async interaction => {
     sel.pingRoleId = role.id;
     saveData();
     return interaction.reply({ content: `✅ Rôle pingé pour **${id}** : ${role}`, ephemeral: true });
-  }
-
-  if (commandName === 'panelsetcategory') {
-    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
-    const id = interaction.options.getString('id');
-    const cat = interaction.options.getChannel('categorie');
-    if (cat.type !== ChannelType.GuildCategory) return interaction.reply({ content: '❌ Ce n\'est pas une catégorie.', ephemeral: true });
-    const sel = d.panel.selections.find(s => s.id === id);
-    if (!sel) return interaction.reply({ content: '❌ Sélection introuvable.', ephemeral: true });
-    sel.categoryId = cat.id;
-    saveData();
-    return interaction.reply({ content: `✅ Catégorie pour **${id}** : ${cat.name}`, ephemeral: true });
-  }
-
-  if (commandName === 'panelsetcategoryid') {
-    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
-    const id = interaction.options.getString('id');
-    const catId = interaction.options.getString('categorie_id');
-    const sel = d.panel.selections.find(s => s.id === id);
-    if (!sel) return interaction.reply({ content: '❌ Sélection introuvable.', ephemeral: true });
-    const cat = interaction.guild.channels.cache.get(catId);
-    if (!cat || cat.type !== ChannelType.GuildCategory) {
-      return interaction.reply({ content: '❌ Aucune catégorie trouvée sur ce serveur avec cet ID.', ephemeral: true });
-    }
-    sel.categoryId = cat.id;
-    saveData();
-    return interaction.reply({ content: `✅ Catégorie pour **${id}** définie via ID : ${cat.name} (\`${cat.id}\`)`, ephemeral: true });
   }
 
   if (commandName === 'paneladdrole') {
@@ -1142,7 +1197,7 @@ client.on(Events.InteractionCreate, async interaction => {
     return interaction.reply({ content: '✅ Panel envoyé !', ephemeral: true });
   }
 
-  // ════ CATÉGORIE PAR DÉFAUT DES TICKETS ════
+  // ════ CATÉGORIE DES TICKETS (UNE SEULE COMMANDE) ════
   if (commandName === 'setticketcategory') {
     if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
     const cat = interaction.options.getChannel('categorie');
@@ -1152,22 +1207,7 @@ client.on(Events.InteractionCreate, async interaction => {
     d.panel.defaultCategoryId = cat.id;
     saveData();
     return interaction.reply({
-      content: `✅ Catégorie par défaut des tickets définie : **${cat.name}** (\`${cat.id}\`)\n*Les sélections avec une catégorie propre l'utiliseront toujours en priorité.*`,
-      ephemeral: true,
-    });
-  }
-
-  if (commandName === 'setticketcategoryid') {
-    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
-    const catId = interaction.options.getString('categorie_id');
-    const cat = interaction.guild.channels.cache.get(catId);
-    if (!cat || cat.type !== ChannelType.GuildCategory) {
-      return interaction.reply({ content: '❌ Aucune catégorie trouvée avec cet ID sur ce serveur.', ephemeral: true });
-    }
-    d.panel.defaultCategoryId = cat.id;
-    saveData();
-    return interaction.reply({
-      content: `✅ Catégorie par défaut des tickets définie via ID : **${cat.name}** (\`${cat.id}\`)\n*Les sélections avec une catégorie propre l'utiliseront toujours en priorité.*`,
+      content: `✅ Tous les tickets s'ouvriront désormais dans : **${cat.name}**`,
       ephemeral: true,
     });
   }
@@ -1177,7 +1217,7 @@ client.on(Events.InteractionCreate, async interaction => {
     d.panel.defaultCategoryId = null;
     saveData();
     return interaction.reply({
-      content: '✅ Catégorie par défaut des tickets supprimée. Les tickets s\'ouvriront désormais à la racine du serveur (sauf si une sélection a sa propre catégorie).',
+      content: '✅ Catégorie des tickets supprimée. Les tickets s\'ouvriront désormais à la racine du serveur.',
       ephemeral: true,
     });
   }
@@ -1188,19 +1228,11 @@ client.on(Events.InteractionCreate, async interaction => {
       ? (interaction.guild.channels.cache.get(d.panel.defaultCategoryId)?.name || `ID: ${d.panel.defaultCategoryId}`)
       : '`Aucune (tickets à la racine)`';
 
-    const selLines = d.panel.selections.map(s => {
-      const catName = s.categoryId
-        ? (interaction.guild.channels.cache.get(s.categoryId)?.name || `ID: ${s.categoryId}`)
-        : '*Utilise la catégorie par défaut*';
-      return `• **${s.id}** → ${catName}`;
-    }).join('\n') || '*Aucune sélection configurée.*';
-
     const embed = new EmbedBuilder()
-      .setTitle('📂 Catégories des Tickets')
+      .setTitle('📂 Catégorie des Tickets')
       .setDescription(
-        `**Catégorie par défaut :** ${defaultCat}\n\n` +
-        `**Catégorie par sélection :**\n${selLines}\n\n` +
-        `*Priorité : catégorie de la sélection > catégorie par défaut > racine du serveur*`
+        `**Catégorie actuelle :** ${defaultCat}\n\n` +
+        `*Tous les tickets s'ouvrent dans cette catégorie, quelle que soit la sélection choisie.*`
       )
       .setColor(0xff69b4)
       .setFooter({ text: 'Mayssa • Call me Mayssa 💋' });
@@ -1279,8 +1311,8 @@ client.on(Events.InteractionCreate, async interaction => {
     if (!d.tickets[interaction.channelId]) return interaction.reply({ content: '❌ Ce salon n\'est pas un ticket.', ephemeral: true });
     const nom = interaction.options.getString('nom');
     try {
-      await interaction.channel.setName(`💋・${nom}`);
-      await interaction.reply({ content: `✅ Ticket renommé en **💋・${nom}**` });
+      await interaction.channel.setName(`${TICKET_PREFIX}${nom}`);
+      await interaction.reply({ content: `✅ Ticket renommé en **${TICKET_PREFIX}${nom}**` });
     } catch {
       await interaction.reply({ content: '❌ Impossible de renommer.', ephemeral: true });
     }
@@ -1612,23 +1644,15 @@ client.on(Events.InteractionCreate, async interaction => {
     return interaction.reply({ content: `✅ Rôle pouvant voir TOUS les tickets : ${role}`, ephemeral: true });
   }
 
-  // ════ FIX TICKETS FANTÔMES ════
+  // ════ FIX TICKETS (FANTÔMES + ORPHELINS) ════
   if (commandName === 'fixtickets') {
     if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
-    let cleaned = 0;
-    for (const chId of Object.keys(d.tickets)) {
-      if (!interaction.guild.channels.cache.has(chId)) {
-        delete d.tickets[chId];
-        cleaned++;
-      }
-    }
-    saveData();
-    return interaction.reply({
-      content: cleaned > 0
-        ? `✅ **${cleaned}** ticket(s) fantôme(s) nettoyé(s) (salon supprimé manuellement). Les membres concernés peuvent rouvrir un ticket. 💋`
-        : `✅ Aucun ticket fantôme trouvé, tout est déjà propre !`,
-      ephemeral: true,
-    });
+    const { cleaned, recovered } = await syncTickets(interaction.guild);
+    const parts = [];
+    if (cleaned > 0) parts.push(`🧹 **${cleaned}** ticket(s) fantôme(s) nettoyé(s) (salon supprimé manuellement).`);
+    if (recovered > 0) parts.push(`♻️ **${recovered}** ticket(s) retrouvé(s) et re-synchronisé(s) (référence perdue, ex: après un redémarrage du bot).`);
+    if (parts.length === 0) parts.push('✅ Tout est déjà propre, aucun ticket fantôme ou orphelin trouvé !');
+    return interaction.reply({ content: parts.join('\n'), ephemeral: true });
   }
 
   // ════ DOG (laisse) ════
@@ -1943,7 +1967,7 @@ function backupChannels(guild) {
   const d = getGuild(guild.id);
   d.channelBackup = {};
   for (const [id, ch] of guild.channels.cache) {
-    if (ch.name && ch.name.startsWith('💋・')) continue;
+    if (ch.name && ch.name.startsWith(TICKET_PREFIX)) continue;
     if (ch.type === ChannelType.GuildText || ch.type === ChannelType.GuildVoice) {
       d.channelBackup[id] = { name: ch.name, type: ch.type, parentId: ch.parentId, position: ch.position };
     }
@@ -1965,7 +1989,7 @@ client.on(Events.ChannelDelete, async channel => {
     saveData();
   }
 
-  if (channel.name && channel.name.startsWith('💋・')) return;
+  if (channel.name && channel.name.startsWith(TICKET_PREFIX)) return;
   const backup = d.channelBackup[channel.id];
   if (!backup) return;
   let deletedBy = null;
@@ -1995,7 +2019,7 @@ client.on(Events.ChannelDelete, async channel => {
 
 client.on(Events.ChannelCreate, async channel => {
   if (!channel.guild) return;
-  if (channel.name && channel.name.startsWith('💋・')) return;
+  if (channel.name && channel.name.startsWith(TICKET_PREFIX)) return;
   const d = getGuild(channel.guild.id);
   const now = Date.now();
   if (!d._channelCreateTimestamps) d._channelCreateTimestamps = [];

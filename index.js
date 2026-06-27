@@ -5,6 +5,8 @@
 //  + Persistance disque (sauvegarde/restauration auto)
 //  + Rôles multiples par sélection ticket
 //  + Catégorie de ticket réglable par ID brut
+//  + FIX : nettoyage automatique des "tickets fantômes"
+//          (salon supprimé manuellement sans passer par /close ou /delete)
 // ============================================================
 
 const {
@@ -501,6 +503,14 @@ const commands = [
   new SlashCommandBuilder().setName('setticketrole').setDescription('Définir le rôle qui peut voir TOUS les tickets')
     .addRoleOption(o => o.setName('role').setDescription('Rôle').setRequired(true)),
 
+  // ── FIX TICKETS FANTÔMES ──
+  // À utiliser quand un salon de ticket a été supprimé MANUELLEMENT (clic droit > Supprimer)
+  // au lieu de passer par /close ou /delete. Le bot garde alors en mémoire que l'utilisateur
+  // a "un ticket ouvert" alors que le salon n'existe plus, et le bloque pour en ouvrir un nouveau.
+  // Cette commande nettoie immédiatement toutes ces références fantômes.
+  new SlashCommandBuilder().setName('fixtickets')
+    .setDescription('Nettoyer les tickets fantômes (salons supprimés manuellement, débloque les utilisateurs concernés)'),
+
   // ── DOG (laisse) ──
   new SlashCommandBuilder().setName('dog').setDescription('Mettre un membre en laisse')
     .addUserOption(o => o.setName('user').setDescription('Membre cible').setRequired(true)),
@@ -548,6 +558,23 @@ client.once(Events.ClientReady, async () => {
     try { await ensureLogCategory(guild); } catch {}
     try { await cacheInvites(guild); } catch {}
     backupChannels(guild);
+
+    // ── FIX : NETTOYAGE DES TICKETS FANTÔMES AU DÉMARRAGE ──
+    // Si un salon de ticket a été supprimé manuellement pendant que le bot
+    // était hors-ligne (ou avant ce correctif), sa référence reste coincée
+    // dans d.tickets et bloque l'utilisateur. On la retire ici si le salon
+    // n'existe plus réellement sur le serveur.
+    const d = getGuild(guild.id);
+    let cleanedOnStart = 0;
+    for (const chId of Object.keys(d.tickets)) {
+      if (!guild.channels.cache.has(chId)) {
+        delete d.tickets[chId];
+        cleanedOnStart++;
+      }
+    }
+    if (cleanedOnStart > 0) {
+      console.log(`🧹 ${cleanedOnStart} ticket(s) fantôme(s) nettoyé(s) au démarrage sur ${guild.name}.`);
+    }
   }
 
   saveData();
@@ -811,7 +838,14 @@ client.on(Events.InteractionCreate, async interaction => {
     const existing = Object.entries(d.tickets).find(([, t]) => t.userId === interaction.user.id);
     if (existing) {
       const ch = interaction.guild.channels.cache.get(existing[0]);
-      return interaction.editReply({ content: `❌ Tu as déjà un ticket ouvert : ${ch ? ch.toString() : '#ticket-supprimé'}` });
+      // ── FIX : si le salon n'existe plus réellement (supprimé manuellement),
+      // on nettoie la référence fantôme au lieu de bloquer l'utilisateur. ──
+      if (!ch) {
+        delete d.tickets[existing[0]];
+        saveData();
+      } else {
+        return interaction.editReply({ content: `❌ Tu as déjà un ticket ouvert : ${ch.toString()}` });
+      }
     }
 
     // ── LOGIQUE DE RÉSOLUTION DE CATÉGORIE ──
@@ -1542,6 +1576,25 @@ client.on(Events.InteractionCreate, async interaction => {
     return interaction.reply({ content: `✅ Rôle pouvant voir TOUS les tickets : ${role}`, ephemeral: true });
   }
 
+  // ════ FIX TICKETS FANTÔMES ════
+  if (commandName === 'fixtickets') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+    let cleaned = 0;
+    for (const chId of Object.keys(d.tickets)) {
+      if (!interaction.guild.channels.cache.has(chId)) {
+        delete d.tickets[chId];
+        cleaned++;
+      }
+    }
+    saveData();
+    return interaction.reply({
+      content: cleaned > 0
+        ? `✅ **${cleaned}** ticket(s) fantôme(s) nettoyé(s) (salon supprimé manuellement). Les membres concernés peuvent rouvrir un ticket. 💋`
+        : `✅ Aucun ticket fantôme trouvé, tout est déjà propre !`,
+      ephemeral: true,
+    });
+  }
+
   // ════ DOG (laisse) ════
   if (commandName === 'dog') {
     if (!canUseDog(gId, interaction.member)) return interaction.reply({ content: '❌ Permission insuffisante.', ephemeral: true });
@@ -1863,9 +1916,20 @@ function backupChannels(guild) {
 
 client.on(Events.ChannelDelete, async channel => {
   if (!channel.guild) return;
-  if (channel.name && channel.name.startsWith('💋・')) return;
   const gId = channel.guild.id;
   const d = getGuild(gId);
+
+  // ── FIX : NETTOYAGE TICKET FANTÔME ──
+  // Si le salon supprimé (manuellement ou autrement) correspond à un ticket
+  // suivi dans d.tickets, on retire la référence immédiatement. Sans ce bloc,
+  // l'utilisateur reste bloqué pour toujours avec "tu as déjà un ticket ouvert"
+  // alors que le salon n'existe plus (c'était exactement le bug rencontré).
+  if (d.tickets[channel.id]) {
+    delete d.tickets[channel.id];
+    saveData();
+  }
+
+  if (channel.name && channel.name.startsWith('💋・')) return;
   const backup = d.channelBackup[channel.id];
   if (!backup) return;
   let deletedBy = null;

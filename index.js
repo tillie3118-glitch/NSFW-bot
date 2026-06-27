@@ -1447,7 +1447,7 @@ async function cmdBlinfo(message, d, gId, member, args) {
 
   const dateStr = new Date(info.timestamp).toLocaleString('fr-FR');
   const motifLine = info.bySysPlus ? '🔒 Caché (Sys+)' : (info.reason || '*Aucune*');
-  const modLine = info.bySysPlus ? '❌ Par Sys+' : `<@${info.byId}>`;
+  const modLine = info.bySysPlus ? ' Par Sys+' : `<@${info.byId}>`;
   const modIdLine = info.bySysPlus ? '*Caché*' : info.byId;
 
   const desc =

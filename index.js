@@ -57,6 +57,8 @@ function getGuild(guildId) {
           { id: 'reports',     label: '• RECOMPENSE BOOSTS • 💋',     description: 'Pour réclamer tes récompenses de boosts',       pingRoleId: null , categoryId: null, extraRoleIds: [] },
           { id: 'autres',      label: '• AUTRES • 💋',      description: 'Aborde un autre sujet ici !',       pingRoleId: null, categoryId: null, extraRoleIds: [] },
         ],
+        // ── CATÉGORIE PAR DÉFAUT pour tous les tickets ──
+        defaultCategoryId: null,
       },
 
       tickets: {},
@@ -129,10 +131,6 @@ function getGuild(guildId) {
 
 // ──────────────────────────────────────────────
 //  PERSISTANCE DISQUE — Sauvegarde / Restauration auto
-//  Permet de reprendre exactement où on était (logs, owners,
-//  managerRoles, blacklist, lockname, dog, invite logger,
-//  rolemember, panel/sélections/rôles/catégories...) après
-//  un redémarrage, un crash, ou une mise en veille du bot.
 // ──────────────────────────────────────────────
 function saveData() {
   try {
@@ -150,6 +148,11 @@ function loadData() {
       const parsed = JSON.parse(raw);
       for (const [gId, data] of Object.entries(parsed)) {
         guildData[gId] = data;
+        // Migration : s'assurer que defaultCategoryId existe sur les anciennes sauvegardes
+        if (!guildData[gId].panel) guildData[gId].panel = {};
+        if (guildData[gId].panel.defaultCategoryId === undefined) {
+          guildData[gId].panel.defaultCategoryId = null;
+        }
       }
       console.log(`💾 Données restaurées depuis le disque (${Object.keys(parsed).length} serveur(s)).`);
     } else {
@@ -183,7 +186,7 @@ const client = new Client({
     GatewayIntentBits.GuildMessageReactions,
     GatewayIntentBits.GuildModeration,
     GatewayIntentBits.GuildInvites,
-    GatewayIntentBits.GuildVoiceStates, // nécessaire pour le système /dog (laisse vocale)
+    GatewayIntentBits.GuildVoiceStates,
   ],
   partials: [Partials.Message, Partials.Reaction, Partials.Channel],
 });
@@ -213,7 +216,6 @@ function canClaimTicket(guildId, member, selectionId) {
   return member.roles.cache.some(r => r.position >= pingRole.position);
 }
 
-// ── Permissions catégories spéciales ──
 function canUseBl(guildId, member) {
   if (isOwner(guildId, member.id)) return true;
   const d = getGuild(guildId);
@@ -232,7 +234,6 @@ function canUseDm(guildId, member) {
   return !!(d.dmRoleId && member.roles.cache.has(d.dmRoleId));
 }
 
-// ── Extrait un ID Discord depuis une mention <@id> ou un ID brut ──
 function extractIdFromArg(arg) {
   if (!arg) return null;
   const mention = arg.match(/^<@!?(\d{15,21})>$/);
@@ -363,7 +364,7 @@ async function sendCloseCountdown(channel) {
 }
 
 // ──────────────────────────────────────────────
-//  SLASH COMMANDS (liste unique, sans doublons)
+//  SLASH COMMANDS
 // ──────────────────────────────────────────────
 const commands = [
   // ── OWNER ──
@@ -402,6 +403,21 @@ const commands = [
   new SlashCommandBuilder().setName('panellistroles').setDescription('Voir les rôles autorisés pour une sélection')
     .addStringOption(o => o.setName('id').setDescription('ID de la sélection').setRequired(true)),
   new SlashCommandBuilder().setName('panel').setDescription('Envoyer le panel ticket dans ce salon'),
+
+  // ── CATÉGORIE PAR DÉFAUT DES TICKETS ──
+  // Permet de choisir dans quelle catégorie s'ouvrent les tickets
+  // quand la sélection choisie n'a pas de catégorie spécifique définie.
+  // Si aucune sélection et aucune catégorie par défaut → aucune catégorie (salon à la racine)
+  new SlashCommandBuilder().setName('setticketcategory')
+    .setDescription('Définir la catégorie par défaut où s\'ouvrent tous les tickets (via sélecteur)')
+    .addChannelOption(o => o.setName('categorie').setDescription('Catégorie Discord').setRequired(true)),
+  new SlashCommandBuilder().setName('setticketcategoryid')
+    .setDescription('Définir la catégorie par défaut des tickets via son ID brut')
+    .addStringOption(o => o.setName('categorie_id').setDescription('ID Discord de la catégorie').setRequired(true)),
+  new SlashCommandBuilder().setName('removeticketcategory')
+    .setDescription('Retirer la catégorie par défaut des tickets (ils s\'ouvriront à la racine)'),
+  new SlashCommandBuilder().setName('ticketcategorystatus')
+    .setDescription('Voir la catégorie par défaut des tickets et la catégorie de chaque sélection'),
 
   // ── TICKET ──
   new SlashCommandBuilder().setName('add').setDescription('Ajouter un membre au ticket')
@@ -509,9 +525,7 @@ async function registerCommands() {
   const rest = new REST({ version: '10' }).setToken(TOKEN);
   try {
     console.log(`📡 Enregistrement des commandes slash (guild) — CLIENT_ID=${CLIENT_ID} GUILD_ID=${GUILD_ID}...`);
-    // On écrase proprement les commandes guild — aucun doublon possible
     await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
-    // On vide les commandes globales si elles existent (source de doublons)
     try {
       await rest.put(Routes.applicationCommands(CLIENT_ID), { body: [] });
       console.log('🧹 Commandes globales vidées (anti-doublon).');
@@ -519,7 +533,6 @@ async function registerCommands() {
     console.log('✅ Commandes enregistrées.');
   } catch (e) {
     console.error('❌ Erreur enregistrement commandes:', e?.code || '', e?.message || e);
-    console.error('👉 Vérifie : 1) CLIENT_ID/GUILD_ID corrects, 2) le bot a bien été invité avec le scope "applications.commands", 3) le TOKEN est valide.');
   }
 }
 
@@ -537,7 +550,6 @@ client.once(Events.ClientReady, async () => {
     backupChannels(guild);
   }
 
-  // On sauvegarde tout de suite après la mise en place des logs/catégories
   saveData();
 });
 
@@ -548,7 +560,7 @@ client.on(Events.GuildCreate, async guild => {
 });
 
 // ══════════════════════════════════════════════
-//  INVITE LOGGER — Mise à jour cache à chaque nouvelle invite
+//  INVITE LOGGER — Mise à jour cache
 // ══════════════════════════════════════════════
 client.on(Events.InviteCreate, async invite => {
   if (!invite.guild) return;
@@ -560,16 +572,41 @@ client.on(Events.InviteDelete, async invite => {
   await cacheInvites(invite.guild);
 });
 
-// Petites phrases d'accueil taquines (style Mayssa, sans détails explicites)
+// ──────────────────────────────────────────────
+//  PHRASES DE BIENVENUE — 30 phrases coquines & tentantes
+//  (style taquin/suggestif, rien d'explicite)
+// ──────────────────────────────────────────────
 const WELCOME_LINES = [
-  "installe-toi bien... on va bien s'amuser ici 😏",
-  "un nouveau visage charmant qui arrive 💋",
-  "mmh, t'as l'air intéressant toi, bienvenue 😈",
-  "j'espère que t'es prêt(e) pour ce serveur 🔥",
-  "bienvenue chéri(e), fais comme chez moi 💋",
-  "encore une jolie surprise dans mes salons 😏",
-  "j'ai déjà hâte de discuter avec toi 💕",
-  "tiens-toi prêt(e), ici on s'ennuie jamais 😘",
+  "t'as sonné à la bonne porte chéri(e) 💋",
+  "mmh, encore un joli visage qui débarque 😏",
+  "bienvenue... j'espère que t'es prêt(e) pour moi 🔥",
+  "tiens tiens, t'as l'air intéressant(e) toi 👀",
+  "installe-toi bien, on va apprendre à se connaître 😈",
+  "j'avais justement une place pour toi 💕",
+  "bienvenue, t'es exactement le genre que j'aime 😘",
+  "oh un nouveau jouet... euh, membre 🙈💋",
+  "t'as mis du temps, mais t'es là, c'est ce qui compte 💖",
+  "bienvenue, garde tes secrets... pour l'instant 😏",
+  "j'espère que t'es là pour rester chéri(e) 💋",
+  "tu rentres dans mon monde maintenant, bonne chance 😈",
+  "une belle surprise ce soir 🌙✨",
+  "bienvenue, j'ai hâte de découvrir qui tu es 👁️",
+  "t'es nouveau(elle) ? parfait, j'adore les nouveautés 💋",
+  "encore un(e) qui a pas pu résister... bienvenue 😉",
+  "tu vas voir, ici on s'ennuie jamais avec moi 🔥",
+  "bienvenue mon/ma chéri(e), fais comme chez toi... presque 😏",
+  "tu viens d'entrer dans quelque chose de spécial 💫",
+  "j'espère que t'es curieux(se), ici ça aide 😈💋",
+  "bienvenue, t'as l'air d'avoir du caractère j'aime ça 👀",
+  "une nouvelle âme à apprivoiser, bienvenue 🖤",
+  "t'es arrivé(e) exactement au bon moment 😘",
+  "bienvenue, on va bien s'entendre toi et moi 💋",
+  "oh mais qui voilà... j'espère que tu tiens bien la pression 🔥",
+  "bienvenue, essaie de pas trop tomber amoureux(se) de moi 😏",
+  "j'ai un feeling avec toi, bienvenue 💕",
+  "tu viens d'atterrir dans mon univers, accroche-toi 💋",
+  "bienvenue, t'as passé le premier test rien qu'en arrivant 😈",
+  "nouvelle tête, nouveau mystère... bienvenue ici 🌸💋",
 ];
 
 // ══════════════════════════════════════════════
@@ -579,7 +616,7 @@ client.on(Events.GuildMemberAdd, async member => {
   const gId = member.guild.id;
   const d = getGuild(gId);
 
-  // ── BLACKLIST : re-ban automatique si la personne tente de revenir ──
+  // ── BLACKLIST : re-ban automatique ──
   if (d.blacklist[member.id]) {
     try { await member.ban({ reason: 'Blacklist active — re-ban automatique' }); } catch {}
     return;
@@ -587,9 +624,7 @@ client.on(Events.GuildMemberAdd, async member => {
 
   // ── AUTO-RÔLE ──
   if (d.autoRoleId) {
-    try {
-      await member.roles.add(d.autoRoleId);
-    } catch {}
+    try { await member.roles.add(d.autoRoleId); } catch {}
   }
 
   // ── ANTI-RAID ──
@@ -634,9 +669,7 @@ client.on(Events.GuildMemberAdd, async member => {
           try {
             const channels = member.guild.channels.cache.filter(c => c.type === ChannelType.GuildText);
             for (const [, ch] of channels) {
-              try {
-                await ch.permissionOverwrites.edit(member.guild.roles.everyone, { SendMessages: false });
-              } catch {}
+              try { await ch.permissionOverwrites.edit(member.guild.roles.everyone, { SendMessages: false }); } catch {}
             }
           } catch {}
           const logEmbed = new EmbedBuilder()
@@ -682,7 +715,6 @@ client.on(Events.GuildMemberAdd, async member => {
         totalInvites = inv.uses;
       }
     });
-    // Rafraîchir le cache
     il.inviteCache = {};
     newInvites.forEach(inv => {
       il.inviteCache[inv.code] = {
@@ -728,7 +760,6 @@ client.on(Events.GuildMemberRemove, async member => {
   const d = getGuild(gId);
   const il = d.inviteLogger;
 
-  // ── LOG KICK (audit log) ──
   try {
     await new Promise(r => setTimeout(r, 1000));
     const logs = await member.guild.fetchAuditLogs({ type: AuditLogEvent.MemberKick, limit: 1 });
@@ -743,7 +774,6 @@ client.on(Events.GuildMemberRemove, async member => {
     }
   } catch {}
 
-  // ── INVITE LOGGER : départ ──
   if (!il.leaveChannelId) return;
   const leaveCh = member.guild.channels.cache.get(il.leaveChannelId);
   if (!leaveCh) return;
@@ -784,22 +814,35 @@ client.on(Events.InteractionCreate, async interaction => {
       return interaction.editReply({ content: `❌ Tu as déjà un ticket ouvert : ${ch ? ch.toString() : '#ticket-supprimé'}` });
     }
 
-    let parentId = sel.categoryId || null;
+    // ── LOGIQUE DE RÉSOLUTION DE CATÉGORIE ──
+    // Priorité 1 : catégorie définie directement sur la sélection (/panelsetcategory ou /panelsetcategoryid)
+    // Priorité 2 : catégorie par défaut définie via /setticketcategory ou /setticketcategoryid
+    // Priorité 3 : aucune catégorie (salon créé à la racine du serveur)
+    let parentId = sel.categoryId || d.panel.defaultCategoryId || null;
+
     const ticketName = `💋・${selId}-${interaction.user.username}`.slice(0, 100);
     const overwrites = [
       { id: interaction.guild.roles.everyone, deny: [PermissionFlagsBits.ViewChannel] },
-      { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+      {
+        id: interaction.user.id,
+        allow: [
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.SendMessages,
+          PermissionFlagsBits.ReadMessageHistory,
+        ],
+        // Le créateur du ticket peut VOIR et ENVOYER des messages,
+        // mais N'A PAS accès aux commandes slash de gestion du ticket
+        // (close, delete, rename, add, remove) car celles-ci vérifient isManager().
+      },
     ];
     if (sel.pingRoleId) {
       overwrites.push({ id: sel.pingRoleId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] });
     }
-    // Rôle(s) supplémentaire(s) ayant accès à cette sélection précise de ticket
     if (sel.extraRoleIds && sel.extraRoleIds.length) {
       for (const rId of sel.extraRoleIds) {
         overwrites.push({ id: rId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] });
       }
     }
-    // Rôle général autorisé à voir TOUS les tickets (en plus du rôle de la catégorie)
     if (d.ticketViewRoleId) {
       overwrites.push({ id: d.ticketViewRoleId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] });
     }
@@ -875,6 +918,7 @@ client.on(Events.InteractionCreate, async interaction => {
     if (cId === 'ticket_close') {
       const ticket = d.tickets[interaction.channelId];
       if (!ticket) return interaction.reply({ content: '❌ Ce salon n\'est pas un ticket.', ephemeral: true });
+      // Seul un manager peut fermer via le bouton (pas la victime)
       if (!isManager(gId, interaction.member)) {
         return interaction.reply({ content: '❌ Permission insuffisante.', ephemeral: true });
       }
@@ -1049,6 +1093,74 @@ client.on(Events.InteractionCreate, async interaction => {
     const { embed, row } = buildPanelComponents(gId);
     await interaction.channel.send({ embeds: [embed], components: [row] });
     return interaction.reply({ content: '✅ Panel envoyé !', ephemeral: true });
+  }
+
+  // ════ CATÉGORIE PAR DÉFAUT DES TICKETS ════
+  // Ces 4 commandes permettent de choisir dans quelle catégorie Discord
+  // s'ouvrent les tickets par défaut (quand la sélection n'en a pas une propre).
+
+  if (commandName === 'setticketcategory') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+    const cat = interaction.options.getChannel('categorie');
+    if (cat.type !== ChannelType.GuildCategory) {
+      return interaction.reply({ content: '❌ Ce n\'est pas une catégorie Discord. Sélectionne une vraie catégorie.', ephemeral: true });
+    }
+    d.panel.defaultCategoryId = cat.id;
+    saveData();
+    return interaction.reply({
+      content: `✅ Catégorie par défaut des tickets définie : **${cat.name}** (\`${cat.id}\`)\n*Les sélections avec une catégorie propre l'utiliseront toujours en priorité.*`,
+      ephemeral: true,
+    });
+  }
+
+  if (commandName === 'setticketcategoryid') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+    const catId = interaction.options.getString('categorie_id');
+    const cat = interaction.guild.channels.cache.get(catId);
+    if (!cat || cat.type !== ChannelType.GuildCategory) {
+      return interaction.reply({ content: '❌ Aucune catégorie trouvée avec cet ID sur ce serveur.', ephemeral: true });
+    }
+    d.panel.defaultCategoryId = cat.id;
+    saveData();
+    return interaction.reply({
+      content: `✅ Catégorie par défaut des tickets définie via ID : **${cat.name}** (\`${cat.id}\`)\n*Les sélections avec une catégorie propre l'utiliseront toujours en priorité.*`,
+      ephemeral: true,
+    });
+  }
+
+  if (commandName === 'removeticketcategory') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+    d.panel.defaultCategoryId = null;
+    saveData();
+    return interaction.reply({
+      content: '✅ Catégorie par défaut des tickets supprimée. Les tickets s\'ouvriront désormais à la racine du serveur (sauf si une sélection a sa propre catégorie).',
+      ephemeral: true,
+    });
+  }
+
+  if (commandName === 'ticketcategorystatus') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+    const defaultCat = d.panel.defaultCategoryId
+      ? (interaction.guild.channels.cache.get(d.panel.defaultCategoryId)?.name || `ID: ${d.panel.defaultCategoryId}`)
+      : '`Aucune (tickets à la racine)`';
+
+    const selLines = d.panel.selections.map(s => {
+      const catName = s.categoryId
+        ? (interaction.guild.channels.cache.get(s.categoryId)?.name || `ID: ${s.categoryId}`)
+        : '*Utilise la catégorie par défaut*';
+      return `• **${s.id}** → ${catName}`;
+    }).join('\n') || '*Aucune sélection configurée.*';
+
+    const embed = new EmbedBuilder()
+      .setTitle('📂 Catégories des Tickets')
+      .setDescription(
+        `**Catégorie par défaut :** ${defaultCat}\n\n` +
+        `**Catégorie par sélection :**\n${selLines}\n\n` +
+        `*Priorité : catégorie de la sélection > catégorie par défaut > racine du serveur*`
+      )
+      .setColor(0xff69b4)
+      .setFooter({ text: 'Mayssa • Call me Mayssa 💋' });
+    return interaction.reply({ embeds: [embed], ephemeral: true });
   }
 
   // ════ TICKET ════
@@ -1296,14 +1408,9 @@ client.on(Events.InteractionCreate, async interaction => {
   if (commandName === 'rolemember') {
     if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
     const role = interaction.options.getRole('role');
-
-    // Sauvegarder pour les nouveaux arrivants
     d.autoRoleId = role.id;
     saveData();
-
     await interaction.deferReply({ ephemeral: true });
-
-    // Donner le rôle à tous les membres existants
     let success = 0;
     let fail = 0;
     try {
@@ -1314,14 +1421,12 @@ client.on(Events.InteractionCreate, async interaction => {
         try {
           await member.roles.add(role.id);
           success++;
-          // Petite pause pour éviter le rate-limit Discord
           if (success % 10 === 0) await new Promise(r => setTimeout(r, 1000));
         } catch { fail++; }
       }
     } catch (e) {
       return interaction.editReply({ content: `❌ Erreur lors du fetch des membres : ${e.message}` });
     }
-
     return interaction.editReply({
       content: `✅ Rôle ${role} attribué à **${success}** membre(s).\n${fail > 0 ? `⚠️ Échec pour **${fail}** membre(s).\n` : ''}💋 Ce rôle sera aussi donné automatiquement aux nouveaux arrivants.`,
     });
@@ -1330,25 +1435,19 @@ client.on(Events.InteractionCreate, async interaction => {
   // ════ SAY ════
   if (commandName === 'say') {
     if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
-
     const salon = interaction.options.getChannel('salon');
     const messageText = interaction.options.getString('message').replace(/\\n/g, '\n');
     const style = interaction.options.getString('style');
     const titre = interaction.options.getString('titre') || null;
     const couleurHex = interaction.options.getString('couleur') || null;
-
-    // Vérif que le salon est un text channel
     if (![ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(salon.type)) {
       return interaction.reply({ content: '❌ Le salon doit être un salon textuel.', ephemeral: true });
     }
-
-    // Parser la couleur
-    let color = 0xff69b4; // rose par défaut
+    let color = 0xff69b4;
     if (couleurHex) {
       const parsed = parseInt(couleurHex.replace('#', ''), 16);
       if (!isNaN(parsed)) color = parsed;
     }
-
     try {
       if (style === 'embed') {
         const embed = new EmbedBuilder()
@@ -1357,7 +1456,6 @@ client.on(Events.InteractionCreate, async interaction => {
           .setFooter({ text: '💋 Mayssa' })
           .setTimestamp();
         if (titre) embed.setTitle(titre);
-
         await salon.send({ embeds: [embed] });
       } else {
         await salon.send({ content: messageText });
@@ -1381,14 +1479,12 @@ client.on(Events.InteractionCreate, async interaction => {
       saveData();
       return interaction.reply({ content: `✅ Salon d'arrivée défini : ${salon} 💋`, ephemeral: true });
     }
-
     if (action === 'setleave') {
       if (!salon) return interaction.reply({ content: '❌ Précise un salon.', ephemeral: true });
       il.leaveChannelId = salon.id;
       saveData();
       return interaction.reply({ content: `✅ Salon de départ défini : ${salon} 🖤`, ephemeral: true });
     }
-
     if (action === 'enable') {
       await interaction.deferReply({ ephemeral: true });
       try {
@@ -1399,7 +1495,6 @@ client.on(Events.InteractionCreate, async interaction => {
         return interaction.editReply({ content: `❌ Erreur : ${e.message}` });
       }
     }
-
     if (action === 'status') {
       const joinCh = il.joinChannelId ? `<#${il.joinChannelId}>` : '`Non défini`';
       const leaveCh = il.leaveChannelId ? `<#${il.leaveChannelId}>` : '`Non défini`';
@@ -1457,18 +1552,13 @@ client.on(Events.InteractionCreate, async interaction => {
     if (isOwner(gId, targetUser.id)) return interaction.reply({ content: '❌ Impossible de mettre en laisse un Sys+ (ownerbot).', ephemeral: true });
     const targetMember = await interaction.guild.members.fetch(targetUser.id).catch(() => null);
     if (!targetMember) return interaction.reply({ content: '❌ Membre introuvable sur ce serveur.', ephemeral: true });
-
     d.dogged[targetUser.id] = { masterId: interaction.user.id, originalNick: targetMember.nickname };
     saveData();
-
     const newNick = `${targetMember.displayName}(🦮 de ${interaction.member.displayName})`.slice(0, 32);
     try { await targetMember.setNickname(newNick); } catch {}
-
-    // Suivi immédiat si le maître et le chien sont déjà en vocal
     if (interaction.member.voice.channelId && targetMember.voice.channelId) {
       try { await targetMember.voice.setChannel(interaction.member.voice.channelId); } catch {}
     }
-
     return interaction.reply({ content: `🦮 ${targetMember} est maintenant en laisse, sous le contrôle de ${interaction.member}.` });
   }
 
@@ -1513,12 +1603,10 @@ client.on(Events.InteractionCreate, async interaction => {
     const targetUser = interaction.options.getUser('user');
     const msgText = interaction.options.getString('message');
     const identite = interaction.options.getString('identite');
-
     let content = msgText;
     if (identite === 'afficher') {
       content = `**Message de ${interaction.user.tag} :**\n${msgText}`;
     }
-
     try {
       await targetUser.send({ content });
       return interaction.reply({ content: `✅ Message envoyé à ${targetUser}.`, ephemeral: true });
@@ -1532,66 +1620,38 @@ client.on(Events.InteractionCreate, async interaction => {
 //  BLACKLIST + LOCKNAME — Commandes texte (préfixes & et ,)
 // ══════════════════════════════════════════════
 
-// ── &bl @user/ID [raison] ──
 async function cmdBl(message, d, gId, member, args) {
   const id = extractIdFromArg(args[0]);
   if (!id) return message.reply({ content: 'Veuillez fournir l\'ID/@user.' });
-
-  if (isOwner(gId, id)) {
-    return message.reply({ content: '❌ Impossible de blacklister un Sys+.' });
-  }
-
-  if (d.blacklist[id]) {
-    return message.reply({ content: '⚠️ Ce membre est déjà blacklisté.' });
-  }
-
-  // Hiérarchie — ne s'applique pas aux Sys+ (ownerbot)
+  if (isOwner(gId, id)) return message.reply({ content: '❌ Impossible de blacklister un Sys+.' });
+  if (d.blacklist[id]) return message.reply({ content: '⚠️ Ce membre est déjà blacklisté.' });
   if (!isOwner(gId, member.id)) {
     const targetMemberCheck = await message.guild.members.fetch(id).catch(() => null);
     if (targetMemberCheck && targetMemberCheck.roles.highest.position >= member.roles.highest.position) {
       return message.reply({ content: '❌ Tu ne peux pas blacklister un membre avec un rôle égal ou supérieur au tien.' });
     }
   }
-
   let target;
   try { target = await client.users.fetch(id); } catch { return message.reply({ content: '❌ Utilisateur introuvable.' }); }
-
   const reason = args.slice(1).join(' ') || null;
-
-  // DM envoyé AVANT le traitement de la blacklist
-  try {
-    await target.send({ content: `Tu as été blacklisté de **${message.guild.name}** raison: ${reason || ''}` });
-  } catch {}
-
-  d.blacklist[id] = {
-    reason,
-    byId: member.id,
-    byTag: member.user.tag,
-    bySysPlus: isOwner(gId, member.id),
-    timestamp: Date.now(),
-  };
+  try { await target.send({ content: `Tu as été blacklisté de **${message.guild.name}** raison: ${reason || ''}` }); } catch {}
+  d.blacklist[id] = { reason, byId: member.id, byTag: member.user.tag, bySysPlus: isOwner(gId, member.id), timestamp: Date.now() };
   saveData();
-
   try { await message.guild.members.ban(id, { reason: reason || 'Blacklist' }); } catch {}
-
   return message.reply({ content: `✅ <@${id}> a été blacklisté${reason ? ` pour : ${reason}` : ''}.` });
 }
 
-// ── &unbl @user/ID ──
 async function cmdUnbl(message, d, gId, member, args) {
   const id = extractIdFromArg(args[0]);
   if (!id) return message.reply({ content: 'Veuillez fournir l\'ID/@user.' });
   if (!d.blacklist[id]) return message.reply({ content: '❌ Ce membre n\'est pas blacklisté.' });
-
   delete d.blacklist[id];
   saveData();
   try { await message.guild.members.unban(id); } catch {}
-
   return message.reply({ content: `✅ <@${id}> n'est plus blacklisté.` });
 }
 
-// ── &blist ──
-async function cmdBlist(message, d, gId) {
+async function cmdBlist(message, d) {
   const entries = Object.entries(d.blacklist);
   const list = entries.length
     ? entries.map(([id, info]) => `• <@${id}> (${id}) — ${info.bySysPlus ? '🔒 raison cachée (Sys+)' : (info.reason || 'Aucune raison')}`).join('\n')
@@ -1600,66 +1660,46 @@ async function cmdBlist(message, d, gId) {
   return message.reply({ embeds: [embed] });
 }
 
-// ── &unblalls ──
-async function cmdUnblalls(message, d, gId) {
+async function cmdUnblalls(message, d) {
   const ids = Object.keys(d.blacklist);
-  for (const id of ids) {
-    try { await message.guild.members.unban(id); } catch {}
-  }
+  for (const id of ids) { try { await message.guild.members.unban(id); } catch {} }
   d.blacklist = {};
   saveData();
   return message.reply({ content: `✅ **${ids.length}** membre(s) retiré(s) de la blacklist.` });
 }
 
-// ── &blinfo @user/ID ──
 async function cmdBlinfo(message, d, gId, member, args) {
   const id = extractIdFromArg(args[0]);
   if (!id) return message.reply({ content: 'Veuillez fournir l\'ID/@user.' });
   const info = d.blacklist[id];
   if (!info) return message.reply({ content: '❌ Ce membre n\'est pas blacklisté.' });
-
   const dateStr = new Date(info.timestamp).toLocaleString('fr-FR');
   const motifLine = info.bySysPlus ? '🔒 Caché (Sys+)' : (info.reason || '*Aucune*');
   const modLine = info.bySysPlus ? '❌ Par Sys+' : `<@${info.byId}>`;
   const modIdLine = info.bySysPlus ? '*Caché*' : info.byId;
-
   const desc =
-    '╭───────────────\n' +
-    '│ 📄 Rapport BL INFO\n' +
-    '╰───────────────\n\n' +
-    '👤 Utilisateur\n' +
-    `• Pseudo : <@${id}>\n` +
-    `• Identifiant : ${id}\n\n` +
-    '📝 Motif :\n' +
-    `${motifLine}\n\n` +
-    '👮 Traitement\n' +
-    `• Modérateur : ${modLine}\n` +
-    `• Identifiant : ${modIdLine}\n\n` +
-    '📅 Date\n' +
-    ` • ${dateStr}`;
-
+    '╭───────────────\n│ 📄 Rapport BL INFO\n╰───────────────\n\n' +
+    '👤 Utilisateur\n' + `• Pseudo : <@${id}>\n• Identifiant : ${id}\n\n` +
+    '📝 Motif :\n' + `${motifLine}\n\n` +
+    '👮 Traitement\n' + `• Modérateur : ${modLine}\n• Identifiant : ${modIdLine}\n\n` +
+    '📅 Date\n' + ` • ${dateStr}`;
   const embed = new EmbedBuilder().setDescription(desc).setColor(0x2b0a2b);
   return message.reply({ embeds: [embed] });
 }
 
-// ── ,lockname @user/ID NomVoulu ──
 async function cmdLockname(message, d, gId, member, args) {
   const id = extractIdFromArg(args[0]);
   if (!id) return message.reply({ content: 'Veuillez fournir l\'ID/@user.' });
   const newName = args.slice(1).join(' ').slice(0, 32);
   if (!newName) return message.reply({ content: '❌ Précise le nom à verrouiller. Exemple : ,lockname @user NomVoulu' });
-
   const targetMember = await message.guild.members.fetch(id).catch(() => null);
   if (!targetMember) return message.reply({ content: '❌ Membre introuvable sur ce serveur.' });
-
   d.lockedNames[id] = newName;
   saveData();
   try { await targetMember.setNickname(newName); } catch {}
-
   return message.reply({ content: `✅ Le pseudo de ${targetMember} est désormais verrouillé sur **${newName}**.` });
 }
 
-// ── ,unlockname @user/ID ──
 async function cmdUnlockname(message, d, args) {
   const id = extractIdFromArg(args[0]);
   if (!id) return message.reply({ content: 'Veuillez fournir l\'ID/@user.' });
@@ -1669,7 +1709,6 @@ async function cmdUnlockname(message, d, args) {
   return message.reply({ content: `✅ Le pseudo de <@${id}> n'est plus verrouillé.` });
 }
 
-// ── ,unlocknamealls ──
 async function cmdUnlocknamealls(message, d) {
   const count = Object.keys(d.lockedNames).length;
   d.lockedNames = {};
@@ -1677,7 +1716,6 @@ async function cmdUnlocknamealls(message, d) {
   return message.reply({ content: `✅ **${count}** pseudo(s) déverrouillé(s).` });
 }
 
-// ── ,locknamelist ──
 async function cmdLocknamelist(message, d) {
   const entries = Object.entries(d.lockedNames);
   const list = entries.length
@@ -1687,38 +1725,32 @@ async function cmdLocknamelist(message, d) {
   return message.reply({ embeds: [embed] });
 }
 
-// ── Dispatcher commandes & ──
 async function handleBlCommands(message, d, gId, member) {
   const args = message.content.trim().split(/\s+/);
   const cmd = args[0].slice(1).toLowerCase();
   const validCommands = ['bl', 'unbl', 'blist', 'unblalls', 'blinfo'];
   if (!validCommands.includes(cmd)) return false;
-
   if (!canUseBl(gId, member)) {
     await message.reply({ content: '❌ Tu n\'as pas la permission d\'utiliser cette commande.' });
     return true;
   }
-
   if (cmd === 'bl') await cmdBl(message, d, gId, member, args.slice(1));
   else if (cmd === 'unbl') await cmdUnbl(message, d, gId, member, args.slice(1));
-  else if (cmd === 'blist') await cmdBlist(message, d, gId);
-  else if (cmd === 'unblalls') await cmdUnblalls(message, d, gId);
+  else if (cmd === 'blist') await cmdBlist(message, d);
+  else if (cmd === 'unblalls') await cmdUnblalls(message, d);
   else if (cmd === 'blinfo') await cmdBlinfo(message, d, gId, member, args.slice(1));
   return true;
 }
 
-// ── Dispatcher commandes , ──
 async function handleLockCommands(message, d, gId, member) {
   const args = message.content.trim().split(/\s+/);
   const cmd = args[0].slice(1).toLowerCase();
   const validCommands = ['lockname', 'unlockname', 'unlocknamealls', 'locknamelist'];
   if (!validCommands.includes(cmd)) return false;
-
   if (!isOwner(gId, member.id)) {
     await message.reply({ content: '❌ Owner bot uniquement.' });
     return true;
   }
-
   if (cmd === 'lockname') await cmdLockname(message, d, gId, member, args.slice(1));
   else if (cmd === 'unlockname') await cmdUnlockname(message, d, args.slice(1));
   else if (cmd === 'unlocknamealls') await cmdUnlocknamealls(message, d);
@@ -1741,13 +1773,11 @@ client.on(Events.MessageCreate, async message => {
   const member = message.member;
   if (!member) return;
 
-  // ── COMMANDES TEXTE & (BLACKLIST) ──
   if (message.content.startsWith('&')) {
     const handled = await handleBlCommands(message, d, gId, member);
     if (handled) return;
   }
 
-  // ── COMMANDES TEXTE , (LOCKNAME) ──
   if (message.content.startsWith(',')) {
     const handled = await handleLockCommands(message, d, gId, member);
     if (handled) return;
@@ -1796,14 +1826,12 @@ client.on(Events.MessageCreate, async message => {
     LINK_REGEX.lastIndex = 0;
     const hasFullBypass = d.antiLink.fullBypassRoles.some(rId => member.roles.cache.has(rId));
     if (hasFullBypass) return;
-
     const hasGifBypass = d.antiLink.gifOnlyBypassRoles.some(rId => member.roles.cache.has(rId));
     if (hasGifBypass) {
       const links = message.content.match(LINK_REGEX) || [];
       const allGifsOk = links.every(l => GIF_ONLY_ALLOWED.test(l));
       if (allGifsOk) return;
     }
-
     if (!d.whitelist.includes(uid) && !isOwner(gId, uid)) {
       try {
         await message.delete();
@@ -1824,56 +1852,40 @@ client.on(Events.MessageCreate, async message => {
 
 // ══════════════════════════════════════════════
 //  PROTECTION SERVEUR — Audit Log + Backups
-//  (les salons ticket 💋・ sont exclus pour ne pas être recréés à la fermeture)
 // ══════════════════════════════════════════════
 function backupChannels(guild) {
   const d = getGuild(guild.id);
   d.channelBackup = {};
   for (const [id, ch] of guild.channels.cache) {
-    if (ch.name && ch.name.startsWith('💋・')) continue; // tickets exclus
+    if (ch.name && ch.name.startsWith('💋・')) continue;
     if (ch.type === ChannelType.GuildText || ch.type === ChannelType.GuildVoice) {
-      d.channelBackup[id] = {
-        name: ch.name,
-        type: ch.type,
-        parentId: ch.parentId,
-        position: ch.position,
-      };
+      d.channelBackup[id] = { name: ch.name, type: ch.type, parentId: ch.parentId, position: ch.position };
     }
   }
 }
 
 client.on(Events.ChannelDelete, async channel => {
   if (!channel.guild) return;
-  if (channel.name && channel.name.startsWith('💋・')) return; // ne jamais restaurer un ticket fermé
+  if (channel.name && channel.name.startsWith('💋・')) return;
   const gId = channel.guild.id;
   const d = getGuild(gId);
   const backup = d.channelBackup[channel.id];
   if (!backup) return;
-
   let deletedBy = null;
   try {
     await new Promise(r => setTimeout(r, 1000));
     const logs = await channel.guild.fetchAuditLogs({ type: AuditLogEvent.ChannelDelete, limit: 1 });
     const entry = logs.entries.first();
-    if (entry && Date.now() - entry.createdTimestamp < 5000) {
-      deletedBy = entry.executor;
-    }
+    if (entry && Date.now() - entry.createdTimestamp < 5000) deletedBy = entry.executor;
   } catch {}
-
   const logEmbed = new EmbedBuilder()
     .setTitle('🔨 Salon Supprimé')
     .setDescription(`**Salon :** ${backup.name}\n**Par :** ${deletedBy ? deletedBy.tag : 'Inconnu'}`)
     .setColor(0xff4444).setTimestamp();
   await sendLog(channel.guild, 'protection', logEmbed);
-
   if (deletedBy && !d.whitelist.includes(deletedBy.id) && !isOwner(gId, deletedBy.id)) {
     try {
-      await channel.guild.channels.create({
-        name: backup.name,
-        type: backup.type,
-        parent: backup.parentId,
-        position: backup.position,
-      });
+      await channel.guild.channels.create({ name: backup.name, type: backup.type, parent: backup.parentId, position: backup.position });
       const restoreEmbed = new EmbedBuilder()
         .setTitle('✅ Salon Restauré')
         .setDescription(`**Salon :** ${backup.name} a été restauré automatiquement.`)
@@ -1881,20 +1893,17 @@ client.on(Events.ChannelDelete, async channel => {
       await sendLog(channel.guild, 'protection', restoreEmbed);
     } catch {}
   }
-
   delete d.channelBackup[channel.id];
 });
 
 client.on(Events.ChannelCreate, async channel => {
   if (!channel.guild) return;
-  if (channel.name && channel.name.startsWith('💋・')) return; // pas de backup pour les tickets
+  if (channel.name && channel.name.startsWith('💋・')) return;
   const d = getGuild(channel.guild.id);
-
   const now = Date.now();
   if (!d._channelCreateTimestamps) d._channelCreateTimestamps = [];
   d._channelCreateTimestamps = d._channelCreateTimestamps.filter(t => now - t < 10000);
   d._channelCreateTimestamps.push(now);
-
   if (d._channelCreateTimestamps.length >= 5) {
     const logEmbed = new EmbedBuilder()
       .setTitle('⚠️ Création Massive de Salons')
@@ -1902,23 +1911,12 @@ client.on(Events.ChannelCreate, async channel => {
       .setColor(0xff8800).setTimestamp();
     await sendLog(channel.guild, 'protection', logEmbed);
   }
-
-  d.channelBackup[channel.id] = {
-    name: channel.name,
-    type: channel.type,
-    parentId: channel.parentId,
-    position: channel.position,
-  };
+  d.channelBackup[channel.id] = { name: channel.name, type: channel.type, parentId: channel.parentId, position: channel.position };
 });
 
 // ══════════════════════════════════════════════
 //  LOGS AVANCÉS + BOOST SERVEUR + LOCKNAME
 // ══════════════════════════════════════════════
-
-// Phrases de remerciement boost — style "Mayssa" coquin/taquin,
-// SANS contenu sexuel explicite (pas de description d'actes,
-// pas de promesse de photos/vidéos privées). Modifiable à la main
-// directement dans ce tableau si tu veux changer le ton.
 const BOOST_THANKS = [
   "Merci {user} pour le boost ! T'es officiellement mon chouchou du jour 💋",
   "Merci {user} pour le boost ! Mon petit cœur fait des étincelles ✨",
@@ -1971,7 +1969,6 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
   const gId = newMember.guild.id;
   const d = getGuild(gId);
 
-  // ── TIMEOUT (mute) ──
   const wasTimedOut = !oldMember.communicationDisabledUntil && newMember.communicationDisabledUntil;
   if (wasTimedOut) {
     const logEmbed = new EmbedBuilder()
@@ -1981,7 +1978,6 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
     await sendLog(newMember.guild, 'sanctions', logEmbed);
   }
 
-  // ── BOOST SERVEUR ──
   const startedBoosting = !oldMember.premiumSinceTimestamp && newMember.premiumSinceTimestamp;
   const stoppedBoosting = oldMember.premiumSinceTimestamp && !newMember.premiumSinceTimestamp;
 
@@ -1995,7 +1991,6 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
     }
   }
 
-  // ── LOCKNAME — anti-changement de pseudo (remise instantanée) ──
   const lockedName = d.lockedNames[newMember.id];
   if (lockedName && newMember.nickname !== lockedName) {
     try { await newMember.setNickname(lockedName); } catch {}
@@ -2003,14 +1998,13 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
 });
 
 // ══════════════════════════════════════════════
-//  DOG (LAISSE) — Suivi vocal automatique du maître
+//  DOG (LAISSE) — Suivi vocal automatique
 // ══════════════════════════════════════════════
 client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
   const gId = newState.guild.id;
   const d = getGuild(gId);
   const movedMemberId = newState.member.id;
 
-  // Cas 1 : le membre qui bouge est un MAÎTRE → faire suivre ses chiens
   if (newState.channelId !== oldState.channelId) {
     for (const [targetId, info] of Object.entries(d.dogged)) {
       if (info.masterId === movedMemberId) {
@@ -2026,7 +2020,6 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
     }
   }
 
-  // Cas 2 : le membre qui bouge est un CHIEN qui s'éloigne de son maître → on le ramène
   const dogInfo = d.dogged[movedMemberId];
   if (dogInfo && newState.channelId) {
     const masterMember = await newState.guild.members.fetch(dogInfo.masterId).catch(() => null);

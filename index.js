@@ -2,6 +2,9 @@
 //  🌸 BOT MAYSSA — Ticket + Protection + InviteLogger + Boost
 //                + Blacklist + Lockname + Dog + DM
 //  Render ready: keepalive Express + self-ping toutes les 2min
+//  + Persistance disque (sauvegarde/restauration auto)
+//  + Rôles multiples par sélection ticket
+//  + Catégorie de ticket réglable par ID brut
 // ============================================================
 
 const {
@@ -13,6 +16,8 @@ const {
 } = require('discord.js');
 const express = require('express');
 const fetch = require('node-fetch');
+const fs = require('fs');
+const path = require('path');
 
 // ──────────────────────────────────────────────
 //  CONFIG — Variables d'environnement Render
@@ -23,6 +28,9 @@ const GUILD_ID         = process.env.GUILD_ID  || '1515771169138147448';
 const RENDER_URL       = process.env.RENDER_EXTERNAL_URL;
 
 const OWNER_IDS_DEFAULT = ['207283656203436042', '685679698054742017'];
+
+// Fichier de sauvegarde persistante (hardcodé, pas besoin de DB externe)
+const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, 'data', 'guildData.json');
 
 // ⚠️ Vérif rapide au démarrage — aide à diagnostiquer la perte du badge slash "/"
 if (!TOKEN) console.error('❌ TOKEN manquant — vérifie les variables d\'environnement Render.');
@@ -43,11 +51,11 @@ function getGuild(guildId) {
         title: '🦋 • SUPPORT TICKET • 🦋',
         description: '♡ ••••• ♡\n\n*• Tu as envie de commander une prestation de Mayssa ? Une question ? Ou autre ?*\n\n💋 **Ouvre un ticket parmis les options suivantes :**',
         selections: [
-          { id: 'prestations', label: '• PRESTATIONS • 💋', description: 'Commande mes services ici !',       pingRoleId: null, categoryId: null },
-          { id: 'questions',   label: '• QUESTIONS • 💋',   description: 'Des questions / demandes ?',        pingRoleId: null, categoryId: null },
-          { id: 'partenariat', label: '• PARTENARIAT • 💋', description: 'Tu souhaites faire un partenariat avec Mayssa ?', pingRoleId: null, categoryId: null },
-          { id: 'reports',     label: '• RECOMPENSE BOOSTS • 💋',     description: 'Pour réclamer tes récompenses de boosts',       pingRoleId: null , categoryId: null },
-          { id: 'autres',      label: '• AUTRES • 💋',      description: 'Aborde un autre sujet ici !',       pingRoleId: null, categoryId: null },
+          { id: 'prestations', label: '• PRESTATIONS • 💋', description: 'Commande mes services ici !',       pingRoleId: null, categoryId: null, extraRoleIds: [] },
+          { id: 'questions',   label: '• QUESTIONS • 💋',   description: 'Des questions / demandes ?',        pingRoleId: null, categoryId: null, extraRoleIds: [] },
+          { id: 'partenariat', label: '• PARTENARIAT • 💋', description: 'Tu souhaites faire un partenariat avec Mayssa ?', pingRoleId: null, categoryId: null, extraRoleIds: [] },
+          { id: 'reports',     label: '• RECOMPENSE BOOSTS • 💋',     description: 'Pour réclamer tes récompenses de boosts',       pingRoleId: null , categoryId: null, extraRoleIds: [] },
+          { id: 'autres',      label: '• AUTRES • 💋',      description: 'Aborde un autre sujet ici !',       pingRoleId: null, categoryId: null, extraRoleIds: [] },
         ],
       },
 
@@ -120,6 +128,50 @@ function getGuild(guildId) {
 }
 
 // ──────────────────────────────────────────────
+//  PERSISTANCE DISQUE — Sauvegarde / Restauration auto
+//  Permet de reprendre exactement où on était (logs, owners,
+//  managerRoles, blacklist, lockname, dog, invite logger,
+//  rolemember, panel/sélections/rôles/catégories...) après
+//  un redémarrage, un crash, ou une mise en veille du bot.
+// ──────────────────────────────────────────────
+function saveData() {
+  try {
+    fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
+    fs.writeFileSync(DATA_FILE, JSON.stringify(guildData, null, 2), 'utf8');
+  } catch (e) {
+    console.error('❌ Erreur de sauvegarde des données:', e.message);
+  }
+}
+
+function loadData() {
+  try {
+    if (fs.existsSync(DATA_FILE)) {
+      const raw = fs.readFileSync(DATA_FILE, 'utf8');
+      const parsed = JSON.parse(raw);
+      for (const [gId, data] of Object.entries(parsed)) {
+        guildData[gId] = data;
+      }
+      console.log(`💾 Données restaurées depuis le disque (${Object.keys(parsed).length} serveur(s)).`);
+    } else {
+      console.log('💾 Aucune sauvegarde trouvée, démarrage avec un état neuf.');
+    }
+  } catch (e) {
+    console.error('❌ Erreur de chargement des données:', e.message);
+  }
+}
+
+// On restaure tout de suite, avant même la connexion à Discord
+loadData();
+
+// Sauvegarde automatique toutes les 30 secondes
+setInterval(saveData, 30 * 1000);
+
+// Sauvegarde à l'arrêt (redeploy, crash géré, Ctrl+C...)
+process.on('SIGINT', () => { saveData(); process.exit(0); });
+process.on('SIGTERM', () => { saveData(); process.exit(0); });
+process.on('exit', () => { saveData(); });
+
+// ──────────────────────────────────────────────
 //  CLIENT DISCORD
 // ──────────────────────────────────────────────
 const client = new Client({
@@ -153,7 +205,9 @@ function canClaimTicket(guildId, member, selectionId) {
   if (isOwner(guildId, member.id)) return true;
   const d = getGuild(guildId);
   const sel = d.panel.selections.find(s => s.id === selectionId);
-  if (!sel || !sel.pingRoleId) return isManager(guildId, member);
+  if (!sel) return isManager(guildId, member);
+  if (sel.extraRoleIds && sel.extraRoleIds.some(rId => member.roles.cache.has(rId))) return true;
+  if (!sel.pingRoleId) return isManager(guildId, member);
   const pingRole = member.guild.roles.cache.get(sel.pingRoleId);
   if (!pingRole) return isManager(guildId, member);
   return member.roles.cache.some(r => r.position >= pingRole.position);
@@ -333,9 +387,20 @@ const commands = [
   new SlashCommandBuilder().setName('panelsetpingrole').setDescription('Définir le rôle pingé pour une raison')
     .addStringOption(o => o.setName('id').setDescription('ID de la sélection').setRequired(true))
     .addRoleOption(o => o.setName('role').setDescription('Rôle à pinger').setRequired(true)),
-  new SlashCommandBuilder().setName('panelsetcategory').setDescription('Définir la catégorie pour une raison')
+  new SlashCommandBuilder().setName('panelsetcategory').setDescription('Définir la catégorie pour une raison (sélecteur Discord)')
     .addStringOption(o => o.setName('id').setDescription('ID de la sélection').setRequired(true))
     .addChannelOption(o => o.setName('categorie').setDescription('Catégorie').setRequired(true)),
+  new SlashCommandBuilder().setName('panelsetcategoryid').setDescription('Définir la catégorie d\'une raison via son ID brut')
+    .addStringOption(o => o.setName('id').setDescription('ID de la sélection').setRequired(true))
+    .addStringOption(o => o.setName('categorie_id').setDescription('ID Discord de la catégorie').setRequired(true)),
+  new SlashCommandBuilder().setName('paneladdrole').setDescription('Donner à un rôle l\'accès aux tickets d\'une sélection')
+    .addStringOption(o => o.setName('id').setDescription('ID de la sélection').setRequired(true))
+    .addRoleOption(o => o.setName('role').setDescription('Rôle à autoriser').setRequired(true)),
+  new SlashCommandBuilder().setName('panelremoverole').setDescription('Retirer l\'accès d\'un rôle à une sélection')
+    .addStringOption(o => o.setName('id').setDescription('ID de la sélection').setRequired(true))
+    .addRoleOption(o => o.setName('role').setDescription('Rôle à retirer').setRequired(true)),
+  new SlashCommandBuilder().setName('panellistroles').setDescription('Voir les rôles autorisés pour une sélection')
+    .addStringOption(o => o.setName('id').setDescription('ID de la sélection').setRequired(true)),
   new SlashCommandBuilder().setName('panel').setDescription('Envoyer le panel ticket dans ce salon'),
 
   // ── TICKET ──
@@ -471,11 +536,15 @@ client.once(Events.ClientReady, async () => {
     try { await cacheInvites(guild); } catch {}
     backupChannels(guild);
   }
+
+  // On sauvegarde tout de suite après la mise en place des logs/catégories
+  saveData();
 });
 
 client.on(Events.GuildCreate, async guild => {
   try { await ensureLogCategory(guild); } catch {}
   try { await cacheInvites(guild); } catch {}
+  saveData();
 });
 
 // ══════════════════════════════════════════════
@@ -490,6 +559,18 @@ client.on(Events.InviteDelete, async invite => {
   if (!invite.guild) return;
   await cacheInvites(invite.guild);
 });
+
+// Petites phrases d'accueil taquines (style Mayssa, sans détails explicites)
+const WELCOME_LINES = [
+  "installe-toi bien... on va bien s'amuser ici 😏",
+  "un nouveau visage charmant qui arrive 💋",
+  "mmh, t'as l'air intéressant toi, bienvenue 😈",
+  "j'espère que t'es prêt(e) pour ce serveur 🔥",
+  "bienvenue chéri(e), fais comme chez moi 💋",
+  "encore une jolie surprise dans mes salons 😏",
+  "j'ai déjà hâte de discuter avec toi 💕",
+  "tiens-toi prêt(e), ici on s'ennuie jamais 😘",
+];
 
 // ══════════════════════════════════════════════
 //  GUILDMEMBERADD — Blacklist + Auto-rôle + Invite Logger
@@ -618,6 +699,7 @@ client.on(Events.GuildMemberAdd, async member => {
 
   const memberCount = member.guild.memberCount;
   const accountAge = Math.floor((Date.now() - member.user.createdTimestamp) / 86400000);
+  const welcomeLine = WELCOME_LINES[Math.floor(Math.random() * WELCOME_LINES.length)];
 
   const joinEmbed = new EmbedBuilder()
     .setTitle('💋 Nouveau membre')
@@ -627,7 +709,8 @@ client.on(Events.GuildMemberAdd, async member => {
       `**💌 Invité par :** ${usedInviter ? usedInviter.inviterMention : '`Lien inconnu`'}\n` +
       `**🔗 Code utilisé :** ${usedCode ? `\`${usedCode}\`` : '`inconnu`'}\n` +
       `**📊 Total invites de l'inviteur :** ${usedInviter ? totalInvites : '–'}\n` +
-      `**👥 Membres du serveur :** ${memberCount}`
+      `**👥 Membres du serveur :** ${memberCount}\n\n` +
+      `*${welcomeLine}*`
     )
     .setColor(0xff69b4)
     .setThumbnail(member.user.displayAvatarURL({ dynamic: true }))
@@ -709,6 +792,12 @@ client.on(Events.InteractionCreate, async interaction => {
     ];
     if (sel.pingRoleId) {
       overwrites.push({ id: sel.pingRoleId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] });
+    }
+    // Rôle(s) supplémentaire(s) ayant accès à cette sélection précise de ticket
+    if (sel.extraRoleIds && sel.extraRoleIds.length) {
+      for (const rId of sel.extraRoleIds) {
+        overwrites.push({ id: rId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] });
+      }
     }
     // Rôle général autorisé à voir TOUS les tickets (en plus du rôle de la catégorie)
     if (d.ticketViewRoleId) {
@@ -825,6 +914,7 @@ client.on(Events.InteractionCreate, async interaction => {
     const user = interaction.options.getUser('user');
     if (d.ownerIds.includes(user.id)) return interaction.reply({ content: '⚠️ Déjà owner.', ephemeral: true });
     d.ownerIds.push(user.id);
+    saveData();
     return interaction.reply({ content: `✅ ${user} ajouté comme owner bot.`, ephemeral: true });
   }
 
@@ -833,6 +923,7 @@ client.on(Events.InteractionCreate, async interaction => {
     const user = interaction.options.getUser('user');
     if (OWNER_IDS_DEFAULT.includes(user.id)) return interaction.reply({ content: '❌ Impossible de retirer un owner par défaut.', ephemeral: true });
     d.ownerIds = d.ownerIds.filter(id => id !== user.id);
+    saveData();
     return interaction.reply({ content: `✅ ${user} retiré des owners.`, ephemeral: true });
   }
 
@@ -847,12 +938,14 @@ client.on(Events.InteractionCreate, async interaction => {
   if (commandName === 'paneltitle') {
     if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
     d.panel.title = interaction.options.getString('titre');
+    saveData();
     return interaction.reply({ content: `✅ Titre mis à jour : **${d.panel.title}**`, ephemeral: true });
   }
 
   if (commandName === 'paneldescription') {
     if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
     d.panel.description = interaction.options.getString('desc').replace(/\\n/g, '\n');
+    saveData();
     return interaction.reply({ content: '✅ Description mise à jour.', ephemeral: true });
   }
 
@@ -863,7 +956,8 @@ client.on(Events.InteractionCreate, async interaction => {
     const desc = interaction.options.getString('description');
     if (d.panel.selections.find(s => s.id === id)) return interaction.reply({ content: '⚠️ ID déjà existant.', ephemeral: true });
     if (d.panel.selections.length >= 25) return interaction.reply({ content: '❌ Maximum 25 options.', ephemeral: true });
-    d.panel.selections.push({ id, label, description: desc, pingRoleId: null, categoryId: null });
+    d.panel.selections.push({ id, label, description: desc, pingRoleId: null, categoryId: null, extraRoleIds: [] });
+    saveData();
     return interaction.reply({ content: `✅ Sélection **${label}** ajoutée.`, ephemeral: true });
   }
 
@@ -873,6 +967,7 @@ client.on(Events.InteractionCreate, async interaction => {
     const before = d.panel.selections.length;
     d.panel.selections = d.panel.selections.filter(s => s.id !== id);
     if (d.panel.selections.length === before) return interaction.reply({ content: '❌ ID introuvable.', ephemeral: true });
+    saveData();
     return interaction.reply({ content: `✅ Sélection **${id}** supprimée.`, ephemeral: true });
   }
 
@@ -883,6 +978,7 @@ client.on(Events.InteractionCreate, async interaction => {
     const sel = d.panel.selections.find(s => s.id === id);
     if (!sel) return interaction.reply({ content: '❌ Sélection introuvable.', ephemeral: true });
     sel.pingRoleId = role.id;
+    saveData();
     return interaction.reply({ content: `✅ Rôle pingé pour **${id}** : ${role}`, ephemeral: true });
   }
 
@@ -894,7 +990,58 @@ client.on(Events.InteractionCreate, async interaction => {
     const sel = d.panel.selections.find(s => s.id === id);
     if (!sel) return interaction.reply({ content: '❌ Sélection introuvable.', ephemeral: true });
     sel.categoryId = cat.id;
+    saveData();
     return interaction.reply({ content: `✅ Catégorie pour **${id}** : ${cat.name}`, ephemeral: true });
+  }
+
+  if (commandName === 'panelsetcategoryid') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+    const id = interaction.options.getString('id');
+    const catId = interaction.options.getString('categorie_id');
+    const sel = d.panel.selections.find(s => s.id === id);
+    if (!sel) return interaction.reply({ content: '❌ Sélection introuvable.', ephemeral: true });
+    const cat = interaction.guild.channels.cache.get(catId);
+    if (!cat || cat.type !== ChannelType.GuildCategory) {
+      return interaction.reply({ content: '❌ Aucune catégorie trouvée sur ce serveur avec cet ID.', ephemeral: true });
+    }
+    sel.categoryId = cat.id;
+    saveData();
+    return interaction.reply({ content: `✅ Catégorie pour **${id}** définie via ID : ${cat.name} (\`${cat.id}\`)`, ephemeral: true });
+  }
+
+  if (commandName === 'paneladdrole') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+    const id = interaction.options.getString('id');
+    const role = interaction.options.getRole('role');
+    const sel = d.panel.selections.find(s => s.id === id);
+    if (!sel) return interaction.reply({ content: '❌ Sélection introuvable.', ephemeral: true });
+    if (!sel.extraRoleIds) sel.extraRoleIds = [];
+    if (sel.extraRoleIds.includes(role.id)) return interaction.reply({ content: '⚠️ Ce rôle a déjà accès à cette sélection.', ephemeral: true });
+    sel.extraRoleIds.push(role.id);
+    saveData();
+    return interaction.reply({ content: `✅ ${role} a maintenant accès aux tickets **${id}**.`, ephemeral: true });
+  }
+
+  if (commandName === 'panelremoverole') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+    const id = interaction.options.getString('id');
+    const role = interaction.options.getRole('role');
+    const sel = d.panel.selections.find(s => s.id === id);
+    if (!sel) return interaction.reply({ content: '❌ Sélection introuvable.', ephemeral: true });
+    if (!sel.extraRoleIds || !sel.extraRoleIds.includes(role.id)) return interaction.reply({ content: '❌ Ce rôle n\'a pas accès à cette sélection.', ephemeral: true });
+    sel.extraRoleIds = sel.extraRoleIds.filter(r => r !== role.id);
+    saveData();
+    return interaction.reply({ content: `✅ ${role} n'a plus accès aux tickets **${id}**.`, ephemeral: true });
+  }
+
+  if (commandName === 'panellistroles') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+    const id = interaction.options.getString('id');
+    const sel = d.panel.selections.find(s => s.id === id);
+    if (!sel) return interaction.reply({ content: '❌ Sélection introuvable.', ephemeral: true });
+    const list = (sel.extraRoleIds || []).map(r => `<@&${r}>`).join('\n') || '*Aucun rôle supplémentaire.*';
+    const embed = new EmbedBuilder().setTitle(`🔑 Rôles autorisés — ${id}`).setDescription(list).setColor(0x5865f2);
+    return interaction.reply({ embeds: [embed], ephemeral: true });
   }
 
   if (commandName === 'panel') {
@@ -990,6 +1137,7 @@ client.on(Events.InteractionCreate, async interaction => {
     const role = interaction.options.getRole('role');
     if (d.managerRoles.includes(role.id)) return interaction.reply({ content: '⚠️ Déjà manager.', ephemeral: true });
     d.managerRoles.push(role.id);
+    saveData();
     return interaction.reply({ content: `✅ ${role} ajouté comme rôle manager.`, ephemeral: true });
   }
 
@@ -997,6 +1145,7 @@ client.on(Events.InteractionCreate, async interaction => {
     if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
     const role = interaction.options.getRole('role');
     d.managerRoles = d.managerRoles.filter(id => id !== role.id);
+    saveData();
     return interaction.reply({ content: `✅ ${role} retiré des managers.`, ephemeral: true });
   }
 
@@ -1014,6 +1163,7 @@ client.on(Events.InteractionCreate, async interaction => {
     const validTypes = ['tickets','antiraid','antispam','antibot','protection','sanctions','advanced','security','boost'];
     if (!validTypes.includes(type)) return interaction.reply({ content: `❌ Type invalide. Valeurs : ${validTypes.join(', ')}`, ephemeral: true });
     d.logsChannels[type] = salon.id;
+    saveData();
     return interaction.reply({ content: `✅ Logs **${type}** → ${salon}`, ephemeral: true });
   }
 
@@ -1022,6 +1172,7 @@ client.on(Events.InteractionCreate, async interaction => {
     await interaction.deferReply({ ephemeral: true });
     try {
       await ensureLogCategory(interaction.guild);
+      saveData();
       return interaction.editReply({ content: '✅ Catégorie et salons de logs créés (ou déjà existants détectés).' });
     } catch (e) {
       return interaction.editReply({ content: `❌ Erreur : ${e.message}` });
@@ -1033,6 +1184,7 @@ client.on(Events.InteractionCreate, async interaction => {
     if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
     const action = interaction.options.getString('action');
     d.antiRaid.enabled = (action === 'on');
+    saveData();
     return interaction.reply({ content: `✅ Anti-raid **${action === 'on' ? 'activé' : 'désactivé'}**.`, ephemeral: true });
   }
 
@@ -1040,6 +1192,7 @@ client.on(Events.InteractionCreate, async interaction => {
     if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
     const action = interaction.options.getString('action');
     d.antiLink.enabled = (action === 'on');
+    saveData();
     return interaction.reply({ content: `✅ Anti-lien **${action === 'on' ? 'activé' : 'désactivé'}**.`, ephemeral: true });
   }
 
@@ -1047,6 +1200,7 @@ client.on(Events.InteractionCreate, async interaction => {
     if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
     const role = interaction.options.getRole('role');
     if (!d.antiLink.fullBypassRoles.includes(role.id)) d.antiLink.fullBypassRoles.push(role.id);
+    saveData();
     return interaction.reply({ content: `✅ ${role} peut envoyer tous les liens.`, ephemeral: true });
   }
 
@@ -1054,6 +1208,7 @@ client.on(Events.InteractionCreate, async interaction => {
     if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
     const role = interaction.options.getRole('role');
     if (!d.antiLink.gifOnlyBypassRoles.includes(role.id)) d.antiLink.gifOnlyBypassRoles.push(role.id);
+    saveData();
     return interaction.reply({ content: `✅ ${role} peut envoyer des GIFs uniquement.`, ephemeral: true });
   }
 
@@ -1076,6 +1231,7 @@ client.on(Events.InteractionCreate, async interaction => {
         .setDescription(`**Par :** ${interaction.user}`)
         .setColor(action === 'on' ? 0xff0000 : 0x00ff00).setTimestamp();
       await sendLog(interaction.guild, 'security', logEmbed);
+      saveData();
       return interaction.editReply({ content: `✅ Lockdown **${action === 'on' ? 'activé' : 'désactivé'}**.` });
     } catch (e) {
       return interaction.editReply({ content: `❌ Erreur : ${e.message}` });
@@ -1090,6 +1246,7 @@ client.on(Events.InteractionCreate, async interaction => {
       activities: [{ name: action === 'on' ? '🔧 Maintenance...' : '💋 Mayssa • Call me Mayssa' }],
       status: action === 'on' ? 'idle' : 'dnd',
     });
+    saveData();
     return interaction.reply({ content: `✅ Mode maintenance **${action === 'on' ? 'activé' : 'désactivé'}**.`, ephemeral: true });
   }
 
@@ -1100,10 +1257,12 @@ client.on(Events.InteractionCreate, async interaction => {
     if (action === 'add') {
       if (!user) return interaction.reply({ content: '❌ Précise un utilisateur.', ephemeral: true });
       if (!d.whitelist.includes(user.id)) d.whitelist.push(user.id);
+      saveData();
       return interaction.reply({ content: `✅ ${user} ajouté à la whitelist.`, ephemeral: true });
     } else if (action === 'remove') {
       if (!user) return interaction.reply({ content: '❌ Précise un utilisateur.', ephemeral: true });
       d.whitelist = d.whitelist.filter(id => id !== user.id);
+      saveData();
       return interaction.reply({ content: `✅ ${user} retiré de la whitelist.`, ephemeral: true });
     } else {
       const list = d.whitelist.map(id => `<@${id}>`).join('\n') || '*Vide*';
@@ -1140,6 +1299,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
     // Sauvegarder pour les nouveaux arrivants
     d.autoRoleId = role.id;
+    saveData();
 
     await interaction.deferReply({ ephemeral: true });
 
@@ -1183,7 +1343,7 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     // Parser la couleur
-    let color = 0xff69b4; // rose NSFW par défaut
+    let color = 0xff69b4; // rose par défaut
     if (couleurHex) {
       const parsed = parseInt(couleurHex.replace('#', ''), 16);
       if (!isNaN(parsed)) color = parsed;
@@ -1218,12 +1378,14 @@ client.on(Events.InteractionCreate, async interaction => {
     if (action === 'setjoin') {
       if (!salon) return interaction.reply({ content: '❌ Précise un salon.', ephemeral: true });
       il.joinChannelId = salon.id;
+      saveData();
       return interaction.reply({ content: `✅ Salon d'arrivée défini : ${salon} 💋`, ephemeral: true });
     }
 
     if (action === 'setleave') {
       if (!salon) return interaction.reply({ content: '❌ Précise un salon.', ephemeral: true });
       il.leaveChannelId = salon.id;
+      saveData();
       return interaction.reply({ content: `✅ Salon de départ défini : ${salon} 🖤`, ephemeral: true });
     }
 
@@ -1231,6 +1393,7 @@ client.on(Events.InteractionCreate, async interaction => {
       await interaction.deferReply({ ephemeral: true });
       try {
         await cacheInvites(interaction.guild);
+        saveData();
         return interaction.editReply({ content: `✅ Cache d'invites rechargé ! **${Object.keys(il.inviteCache).length}** invite(s) en mémoire.` });
       } catch (e) {
         return interaction.editReply({ content: `❌ Erreur : ${e.message}` });
@@ -1259,6 +1422,7 @@ client.on(Events.InteractionCreate, async interaction => {
     if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
     const role = interaction.options.getRole('role');
     d.blRoleId = role.id;
+    saveData();
     return interaction.reply({ content: `✅ Rôle autorisé pour &bl : ${role}`, ephemeral: true });
   }
 
@@ -1266,6 +1430,7 @@ client.on(Events.InteractionCreate, async interaction => {
     if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
     const role = interaction.options.getRole('role');
     d.dogRoleId = role.id;
+    saveData();
     return interaction.reply({ content: `✅ Rôle autorisé pour /dog : ${role}`, ephemeral: true });
   }
 
@@ -1273,6 +1438,7 @@ client.on(Events.InteractionCreate, async interaction => {
     if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
     const role = interaction.options.getRole('role');
     d.dmRoleId = role.id;
+    saveData();
     return interaction.reply({ content: `✅ Rôle autorisé pour /dm : ${role}`, ephemeral: true });
   }
 
@@ -1280,6 +1446,7 @@ client.on(Events.InteractionCreate, async interaction => {
     if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
     const role = interaction.options.getRole('role');
     d.ticketViewRoleId = role.id;
+    saveData();
     return interaction.reply({ content: `✅ Rôle pouvant voir TOUS les tickets : ${role}`, ephemeral: true });
   }
 
@@ -1292,6 +1459,7 @@ client.on(Events.InteractionCreate, async interaction => {
     if (!targetMember) return interaction.reply({ content: '❌ Membre introuvable sur ce serveur.', ephemeral: true });
 
     d.dogged[targetUser.id] = { masterId: interaction.user.id, originalNick: targetMember.nickname };
+    saveData();
 
     const newNick = `${targetMember.displayName}(🦮 de ${interaction.member.displayName})`.slice(0, 32);
     try { await targetMember.setNickname(newNick); } catch {}
@@ -1310,6 +1478,7 @@ client.on(Events.InteractionCreate, async interaction => {
     if (!d.dogged[targetUser.id]) return interaction.reply({ content: '❌ Ce membre n\'est pas en laisse.', ephemeral: true });
     const info = d.dogged[targetUser.id];
     delete d.dogged[targetUser.id];
+    saveData();
     const targetMember = await interaction.guild.members.fetch(targetUser.id).catch(() => null);
     if (targetMember) { try { await targetMember.setNickname(info.originalNick || null); } catch {} }
     return interaction.reply({ content: `✅ ${targetUser} n'est plus en laisse.` });
@@ -1324,6 +1493,7 @@ client.on(Events.InteractionCreate, async interaction => {
       if (targetMember) { try { await targetMember.setNickname(info.originalNick || null); } catch {} }
     }
     d.dogged = {};
+    saveData();
     return interaction.editReply({ content: `✅ **${entries.length}** membre(s) libéré(s) de leur laisse.` });
   }
 
@@ -1400,6 +1570,7 @@ async function cmdBl(message, d, gId, member, args) {
     bySysPlus: isOwner(gId, member.id),
     timestamp: Date.now(),
   };
+  saveData();
 
   try { await message.guild.members.ban(id, { reason: reason || 'Blacklist' }); } catch {}
 
@@ -1413,6 +1584,7 @@ async function cmdUnbl(message, d, gId, member, args) {
   if (!d.blacklist[id]) return message.reply({ content: '❌ Ce membre n\'est pas blacklisté.' });
 
   delete d.blacklist[id];
+  saveData();
   try { await message.guild.members.unban(id); } catch {}
 
   return message.reply({ content: `✅ <@${id}> n'est plus blacklisté.` });
@@ -1435,6 +1607,7 @@ async function cmdUnblalls(message, d, gId) {
     try { await message.guild.members.unban(id); } catch {}
   }
   d.blacklist = {};
+  saveData();
   return message.reply({ content: `✅ **${ids.length}** membre(s) retiré(s) de la blacklist.` });
 }
 
@@ -1447,7 +1620,7 @@ async function cmdBlinfo(message, d, gId, member, args) {
 
   const dateStr = new Date(info.timestamp).toLocaleString('fr-FR');
   const motifLine = info.bySysPlus ? '🔒 Caché (Sys+)' : (info.reason || '*Aucune*');
-  const modLine = info.bySysPlus ? ' Par Sys+' : `<@${info.byId}>`;
+  const modLine = info.bySysPlus ? '❌ Par Sys+' : `<@${info.byId}>`;
   const modIdLine = info.bySysPlus ? '*Caché*' : info.byId;
 
   const desc =
@@ -1480,6 +1653,7 @@ async function cmdLockname(message, d, gId, member, args) {
   if (!targetMember) return message.reply({ content: '❌ Membre introuvable sur ce serveur.' });
 
   d.lockedNames[id] = newName;
+  saveData();
   try { await targetMember.setNickname(newName); } catch {}
 
   return message.reply({ content: `✅ Le pseudo de ${targetMember} est désormais verrouillé sur **${newName}**.` });
@@ -1491,6 +1665,7 @@ async function cmdUnlockname(message, d, args) {
   if (!id) return message.reply({ content: 'Veuillez fournir l\'ID/@user.' });
   if (!d.lockedNames[id]) return message.reply({ content: '❌ Ce membre n\'a pas de pseudo verrouillé.' });
   delete d.lockedNames[id];
+  saveData();
   return message.reply({ content: `✅ Le pseudo de <@${id}> n'est plus verrouillé.` });
 }
 
@@ -1498,6 +1673,7 @@ async function cmdUnlockname(message, d, args) {
 async function cmdUnlocknamealls(message, d) {
   const count = Object.keys(d.lockedNames).length;
   d.lockedNames = {};
+  saveData();
   return message.reply({ content: `✅ **${count}** pseudo(s) déverrouillé(s).` });
 }
 
@@ -1739,23 +1915,39 @@ client.on(Events.ChannelCreate, async channel => {
 //  LOGS AVANCÉS + BOOST SERVEUR + LOCKNAME
 // ══════════════════════════════════════════════
 
-// Phrases courtes, "humaines", style Mayssa — piochées au hasard pour ne pas être robotique
+// Phrases de remerciement boost — style "Mayssa" coquin/taquin,
+// SANS contenu sexuel explicite (pas de description d'actes,
+// pas de promesse de photos/vidéos privées). Modifiable à la main
+// directement dans ce tableau si tu veux changer le ton.
 const BOOST_THANKS = [
-  "merci pour le boost bébé, tu sais déjà comment me faire plaisir 💋",
-  "mmh, un boost de toi... tu mérites une attention spéciale 😘",
-  "boost reçu 💋 t'es officiellement dans mes favoris maintenant",
-  "merci mon cœur, ce genre de geste ne s'oublie pas 💋",
-  "tu viens de monter dans mon classement perso... merci bébé 😏",
-  "un boost de plus, une raison de plus de penser à toi 💋",
-  "ohh toi 👀 merci pour le boost, t'es adorable",
+  "Merci {user} pour le boost ! T'es officiellement mon chouchou du jour 💋",
+  "Merci {user} pour le boost ! Mon petit cœur fait des étincelles ✨",
+  "Merci {user} pour le boost ! Tu mérites une place VIP dans mes pensées 😘",
+  "Merci {user} pour le boost ! Je rougis un peu là... 😳💋",
+  "Merci {user} pour le boost ! T'as un radar à bonnes actions toi 🥰",
+  "Merci {user} pour le boost ! Ça me fait sourire bêtement 💕",
+  "Merci {user} pour le boost ! Mon serveur ET moi on te dit merci 😏",
+  "Merci {user} pour le boost ! Tu viens de monter dans mon classement perso 📈💋",
+  "Merci {user} pour le boost ! T'es un vrai trésor toi 💎",
+  "Merci {user} pour le boost ! Ça me donne des papillons dans le ventre 🦋",
+  "Merci {user} pour le boost ! J'ai presque envie de te faire un câlin virtuel 🤗",
+  "Merci {user} pour le boost ! Tu mérites une médaille du meilleur booster 🏆",
+  "Merci {user} pour le boost ! Mon petit cœur en avait besoin, merci bébé 💋",
+  "Merci {user} pour le boost ! T'es dans mes bonnes grâces maintenant 😈",
+  "Merci {user} pour le boost ! Ça me met de bonne humeur direct 🌟",
+  "Merci {user} pour le boost ! Continue comme ça et je t'adopte 😏",
+  "Merci {user} pour le boost ! T'as fait ma journée, vraiment 💖",
+  "Merci {user} pour le boost ! Mon égo te dit merci aussi 💅",
+  "Merci {user} pour le boost ! On va dire que t'es mon préféré pour l'instant 😘",
+  "Merci {user} pour le boost ! Petit coquin, ça me touche 💋",
 ];
 
 const BOOST_BYE = [
-  "tu m'as quittée... le boost est parti 🖤",
-  "le boost s'en va, mais je garde un œil sur toi 👀",
-  "bon... on dirait que tu m'as un peu oubliée 🖤",
-  "le boost a disparu, mais la porte reste ouverte 💋",
-  "ça pique un peu, mais je comprends, à bientôt peut-être 🖤",
+  "{user} vient de me quitter... le boost est parti 🖤",
+  "{user} a disparu, mais je garde un œil sur toi 👀",
+  "Bon... on dirait que {user} m'a un peu oubliée 🖤",
+  "Le boost de {user} s'en est allé, mais la porte reste ouverte 💋",
+  "Ça pique un peu {user}, mais à bientôt peut-être 🖤",
 ];
 
 client.on(Events.GuildBanAdd, async ban => {
@@ -1796,10 +1988,10 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
   if ((startedBoosting || stoppedBoosting) && d.logsChannels.boost) {
     const ch = newMember.guild.channels.cache.get(d.logsChannels.boost);
     if (ch) {
-      const phrase = startedBoosting
-        ? BOOST_THANKS[Math.floor(Math.random() * BOOST_THANKS.length)]
-        : BOOST_BYE[Math.floor(Math.random() * BOOST_BYE.length)];
-      try { await ch.send({ content: `${newMember} ${phrase}` }); } catch {}
+      const list = startedBoosting ? BOOST_THANKS : BOOST_BYE;
+      const template = list[Math.floor(Math.random() * list.length)];
+      const phrase = template.replace('{user}', newMember.toString());
+      try { await ch.send({ content: phrase }); } catch {}
     }
   }
 
@@ -1876,4 +2068,4 @@ setInterval(async () => {
 // ══════════════════════════════════════════════
 //  LOGIN
 // ══════════════════════════════════════════════
-client.login(TOKEN)
+client.login(TOKEN);

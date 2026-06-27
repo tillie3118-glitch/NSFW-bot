@@ -600,7 +600,8 @@ const commands = [
   // salon de ticket a été supprimé manuellement et bloque encore un membre.
   // Cette commande répare les deux cas en une seule fois.
   new SlashCommandBuilder().setName('fixtickets')
-    .setDescription('Réparer le système de tickets (nettoie les fantômes + retrouve les tickets perdus après un redémarrage)'),
+    .setDescription('Réparer les tickets : nettoie fantômes + retrouve orphelins post-redémarrage'),
+
 
   // ── DOG (laisse) ──
   new SlashCommandBuilder().setName('dog').setDescription('Mettre un membre en laisse')

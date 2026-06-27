@@ -7,6 +7,8 @@
 //  + Catégorie de ticket réglable par ID brut
 //  + FIX : nettoyage automatique des "tickets fantômes"
 //          (salon supprimé manuellement sans passer par /close ou /delete)
+//  + AJOUT : /setcategoryboost (salon des remerciements de boost)
+//          + /setcategorywelcome (salon des messages de bienvenue)
 // ============================================================
 
 const {
@@ -441,6 +443,17 @@ const commands = [
     .addStringOption(o => o.setName('type').setDescription('Type (tickets/antiraid/antispam/antibot/protection/sanctions/advanced/security/boost)').setRequired(true))
     .addChannelOption(o => o.setName('salon').setDescription('Salon').setRequired(true)),
   new SlashCommandBuilder().setName('setuplogs').setDescription('Créer automatiquement tous les salons de logs'),
+
+  // ── RACCOURCIS SALONS BOOST / WELCOME ──
+  // Raccourcis simples et dédiés, en plus de /setlogschannel et /invitelogger,
+  // pour définir rapidement le salon des remerciements de boost et le salon
+  // des messages de bienvenue, sans avoir à choisir un "type" ou une "action".
+  new SlashCommandBuilder().setName('setcategoryboost')
+    .setDescription('Définir le salon où sont envoyés les remerciements de boost')
+    .addChannelOption(o => o.setName('salon').setDescription('Salon des remerciements de boost').setRequired(true)),
+  new SlashCommandBuilder().setName('setcategorywelcome')
+    .setDescription('Définir le salon où sont envoyés les messages de bienvenue (arrivées)')
+    .addChannelOption(o => o.setName('salon').setDescription('Salon des messages de bienvenue').setRequired(true)),
 
   // ── ANTI-RAID ──
   new SlashCommandBuilder().setName('antiraid').setDescription('Activer/Désactiver la protection anti-raid')
@@ -1320,6 +1333,29 @@ client.on(Events.InteractionCreate, async interaction => {
     } catch (e) {
       return interaction.editReply({ content: `❌ Erreur : ${e.message}` });
     }
+  }
+
+  // ════ RACCOURCIS SALONS BOOST / WELCOME ════
+  if (commandName === 'setcategoryboost') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+    const salon = interaction.options.getChannel('salon');
+    if (![ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(salon.type)) {
+      return interaction.reply({ content: '❌ Le salon doit être un salon textuel.', ephemeral: true });
+    }
+    d.logsChannels.boost = salon.id;
+    saveData();
+    return interaction.reply({ content: `✅ Salon des remerciements de boost défini : ${salon} 🚀💋`, ephemeral: true });
+  }
+
+  if (commandName === 'setcategorywelcome') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+    const salon = interaction.options.getChannel('salon');
+    if (![ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(salon.type)) {
+      return interaction.reply({ content: '❌ Le salon doit être un salon textuel.', ephemeral: true });
+    }
+    d.inviteLogger.joinChannelId = salon.id;
+    saveData();
+    return interaction.reply({ content: `✅ Salon de bienvenue défini : ${salon} 💋`, ephemeral: true });
   }
 
   // ════ ANTI-RAID ════

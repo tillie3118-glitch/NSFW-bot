@@ -405,9 +405,6 @@ const commands = [
   new SlashCommandBuilder().setName('panel').setDescription('Envoyer le panel ticket dans ce salon'),
 
   // ── CATÉGORIE PAR DÉFAUT DES TICKETS ──
-  // Permet de choisir dans quelle catégorie s'ouvrent les tickets
-  // quand la sélection choisie n'a pas de catégorie spécifique définie.
-  // Si aucune sélection et aucune catégorie par défaut → aucune catégorie (salon à la racine)
   new SlashCommandBuilder().setName('setticketcategory')
     .setDescription('Définir la catégorie par défaut où s\'ouvrent tous les tickets (via sélecteur)')
     .addChannelOption(o => o.setName('categorie').setDescription('Catégorie Discord').setRequired(true)),
@@ -418,6 +415,12 @@ const commands = [
     .setDescription('Retirer la catégorie par défaut des tickets (ils s\'ouvriront à la racine)'),
   new SlashCommandBuilder().setName('ticketcategorystatus')
     .setDescription('Voir la catégorie par défaut des tickets et la catégorie de chaque sélection'),
+
+  // ── MENU INTERACTIF CATÉGORIE TICKETS (NOUVEAU) ──
+  // Affiche un dropdown avec toutes les catégories du serveur.
+  // Le owner sélectionne celle où les tickets doivent s'ouvrir par défaut.
+  new SlashCommandBuilder().setName('menuticketcategorie')
+    .setDescription('Choisir la catégorie d\'ouverture des tickets via un menu déroulant interactif'),
 
   // ── TICKET ──
   new SlashCommandBuilder().setName('add').setDescription('Ajouter un membre au ticket')
@@ -573,10 +576,10 @@ client.on(Events.InviteDelete, async invite => {
 });
 
 // ──────────────────────────────────────────────
-//  PHRASES DE BIENVENUE — 30 phrases coquines & tentantes
-//  (style taquin/suggestif, rien d'explicite)
+//  PHRASES DE BIENVENUE — 60 phrases (30 originales + 30 nouvelles courtes)
 // ──────────────────────────────────────────────
 const WELCOME_LINES = [
+  // ── 30 phrases originales ──
   "t'as sonné à la bonne porte chéri(e) 💋",
   "mmh, encore un joli visage qui débarque 😏",
   "bienvenue... j'espère que t'es prêt(e) pour moi 🔥",
@@ -607,6 +610,38 @@ const WELCOME_LINES = [
   "tu viens d'atterrir dans mon univers, accroche-toi 💋",
   "bienvenue, t'as passé le premier test rien qu'en arrivant 😈",
   "nouvelle tête, nouveau mystère... bienvenue ici 🌸💋",
+
+  // ── 30 nouvelles phrases courtes ──
+  "déjà là ? on va bien s'amuser 😈",
+  "t'as l'air d'avoir du potentiel toi 💋",
+  "bienvenue, t'es mon type 😏",
+  "mmh nouvelle tête... j'aime ça 👀",
+  "encore un(e) que je vais apprivoiser 😈",
+  "bienvenue, garde un œil sur moi 😉",
+  "t'es là, c'est déjà bien parti 💕",
+  "j'espère que tu tiens la pression 🔥",
+  "tiens tiens, une nouvelle proie... euh, membre 😏",
+  "bienvenue, j'adore les surprises 😘",
+  "bonne pioche chéri(e) 💋",
+  "t'as frappé à la bonne porte 😈",
+  "j'espère que tu restes longtemps 💕",
+  "déjà sous mon charme ? 😏",
+  "essaie de rester sage ici 😉💋",
+  "j'ai l'œil sur toi maintenant 👀",
+  "t'as l'air curieux(se)... bon début 🔥",
+  "reste proche de moi 💋",
+  "oh tu m'intéresses toi 😘",
+  "t'avise pas de partir trop vite 😈",
+  "j'avais besoin d'une tête comme la tienne 💋",
+  "bienvenue, c'est chez moi ici 😏",
+  "on va bien s'amuser toi et moi 🔥",
+  "t'es arrivé(e) au bon endroit 💕",
+  "je t'attendais presque 😘",
+  "nouvelle âme... intéressant(e) 👁️",
+  "j'aime ce que je vois 😏💋",
+  "ça vaut le détour ici, tu vas voir 🔥",
+  "t'as l'air d'en avoir sous le capot 😈",
+  "maintenant t'es dans mon monde 💋",
 ];
 
 // ══════════════════════════════════════════════
@@ -815,8 +850,8 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     // ── LOGIQUE DE RÉSOLUTION DE CATÉGORIE ──
-    // Priorité 1 : catégorie définie directement sur la sélection (/panelsetcategory ou /panelsetcategoryid)
-    // Priorité 2 : catégorie par défaut définie via /setticketcategory ou /setticketcategoryid
+    // Priorité 1 : catégorie définie directement sur la sélection
+    // Priorité 2 : catégorie par défaut (/setticketcategory ou /menuticketcategorie)
     // Priorité 3 : aucune catégorie (salon créé à la racine du serveur)
     let parentId = sel.categoryId || d.panel.defaultCategoryId || null;
 
@@ -885,6 +920,36 @@ client.on(Events.InteractionCreate, async interaction => {
     return;
   }
 
+  // ── SELECT MENU : choix catégorie tickets (NOUVEAU) ──
+  // Déclenché par /menuticketcategorie → le owner choisit dans le dropdown
+  if (interaction.isStringSelectMenu() && interaction.customId === 'select_ticket_category') {
+    if (!isOwner(gId, interaction.user.id)) {
+      return interaction.update({ content: '❌ Owner bot uniquement.', components: [] });
+    }
+    const selectedId = interaction.values[0];
+
+    if (selectedId === 'none') {
+      d.panel.defaultCategoryId = null;
+      saveData();
+      return interaction.update({
+        content: '✅ Catégorie par défaut supprimée. Les tickets s\'ouvriront à la racine du serveur.',
+        components: [],
+      });
+    }
+
+    const cat = interaction.guild.channels.cache.get(selectedId);
+    if (!cat || cat.type !== ChannelType.GuildCategory) {
+      return interaction.update({ content: '❌ Catégorie introuvable sur ce serveur.', components: [] });
+    }
+
+    d.panel.defaultCategoryId = cat.id;
+    saveData();
+    return interaction.update({
+      content: `✅ Catégorie par défaut des tickets définie : **${cat.name}** (\`${cat.id}\`)\n*Les sélections avec une catégorie propre l'utiliseront toujours en priorité.*`,
+      components: [],
+    });
+  }
+
   // ── BOUTONS TICKET ──
   if (interaction.isButton()) {
     const cId = interaction.customId;
@@ -918,7 +983,7 @@ client.on(Events.InteractionCreate, async interaction => {
     if (cId === 'ticket_close') {
       const ticket = d.tickets[interaction.channelId];
       if (!ticket) return interaction.reply({ content: '❌ Ce salon n\'est pas un ticket.', ephemeral: true });
-      // Seul un manager peut fermer via le bouton (pas la victime)
+      // Seul un manager peut fermer via le bouton (pas le créateur)
       if (!isManager(gId, interaction.member)) {
         return interaction.reply({ content: '❌ Permission insuffisante.', ephemeral: true });
       }
@@ -1096,8 +1161,6 @@ client.on(Events.InteractionCreate, async interaction => {
   }
 
   // ════ CATÉGORIE PAR DÉFAUT DES TICKETS ════
-  // Ces 4 commandes permettent de choisir dans quelle catégorie Discord
-  // s'ouvrent les tickets par défaut (quand la sélection n'en a pas une propre).
 
   if (commandName === 'setticketcategory') {
     if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
@@ -1161,6 +1224,53 @@ client.on(Events.InteractionCreate, async interaction => {
       .setColor(0xff69b4)
       .setFooter({ text: 'Mayssa • Call me Mayssa 💋' });
     return interaction.reply({ embeds: [embed], ephemeral: true });
+  }
+
+  // ════ MENU INTERACTIF CATÉGORIE TICKETS (NOUVEAU) ════
+  // Récupère toutes les catégories du serveur et les affiche dans un dropdown.
+  // Le owner n'a plus besoin de connaître l'ID — il sélectionne directement dans la liste.
+  if (commandName === 'menuticketcategorie') {
+    if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
+
+    const categories = interaction.guild.channels.cache
+      .filter(c => c.type === ChannelType.GuildCategory)
+      .sort((a, b) => a.position - b.position)
+      .map(c => ({
+        label: c.name.slice(0, 100),
+        value: c.id,
+        description: `ID : ${c.id}`,
+      }));
+
+    if (!categories.size && !categories.length) {
+      return interaction.reply({ content: '❌ Aucune catégorie trouvée sur ce serveur.', ephemeral: true });
+    }
+
+    const options = [
+      {
+        label: '❌ Aucune catégorie (racine du serveur)',
+        value: 'none',
+        description: 'Les tickets s\'ouvriront sans catégorie',
+        emoji: '🗂️',
+      },
+      ...(Array.isArray(categories) ? categories : [...categories.values()]).slice(0, 24),
+    ];
+
+    const currentCat = d.panel.defaultCategoryId
+      ? (interaction.guild.channels.cache.get(d.panel.defaultCategoryId)?.name || `ID: ${d.panel.defaultCategoryId}`)
+      : '`Aucune (racine)`';
+
+    const selectRow = new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId('select_ticket_category')
+        .setPlaceholder('📂 Choisir une catégorie...')
+        .addOptions(options)
+    );
+
+    return interaction.reply({
+      content: `📂 **Catégorie actuelle :** ${currentCat}\n\nSélectionne la catégorie où s\'ouvriront les tickets par défaut :`,
+      components: [selectRow],
+      ephemeral: true,
+    });
   }
 
   // ════ TICKET ════
@@ -1986,79 +2096,4 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
     if (ch) {
       const list = startedBoosting ? BOOST_THANKS : BOOST_BYE;
       const template = list[Math.floor(Math.random() * list.length)];
-      const phrase = template.replace('{user}', newMember.toString());
-      try { await ch.send({ content: phrase }); } catch {}
-    }
-  }
-
-  const lockedName = d.lockedNames[newMember.id];
-  if (lockedName && newMember.nickname !== lockedName) {
-    try { await newMember.setNickname(lockedName); } catch {}
-  }
-});
-
-// ══════════════════════════════════════════════
-//  DOG (LAISSE) — Suivi vocal automatique
-// ══════════════════════════════════════════════
-client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
-  const gId = newState.guild.id;
-  const d = getGuild(gId);
-  const movedMemberId = newState.member.id;
-
-  if (newState.channelId !== oldState.channelId) {
-    for (const [targetId, info] of Object.entries(d.dogged)) {
-      if (info.masterId === movedMemberId) {
-        const dogMember = await newState.guild.members.fetch(targetId).catch(() => null);
-        if (dogMember && dogMember.voice.channelId) {
-          if (newState.channelId) {
-            try { await dogMember.voice.setChannel(newState.channelId); } catch {}
-          } else {
-            try { await dogMember.voice.disconnect(); } catch {}
-          }
-        }
-      }
-    }
-  }
-
-  const dogInfo = d.dogged[movedMemberId];
-  if (dogInfo && newState.channelId) {
-    const masterMember = await newState.guild.members.fetch(dogInfo.masterId).catch(() => null);
-    const masterChannelId = masterMember?.voice?.channelId || null;
-    if (masterChannelId && newState.channelId !== masterChannelId) {
-      try { await newState.member.voice.setChannel(masterChannelId); } catch {}
-    }
-  }
-});
-
-// ══════════════════════════════════════════════
-//  EXPRESS KEEPALIVE
-// ══════════════════════════════════════════════
-const app = express();
-
-app.get('/', (req, res) => {
-  res.send('🌸 Mayssa Bot — En ligne 💋');
-});
-
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', guilds: client.guilds.cache.size, uptime: process.uptime() });
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🌐 Serveur keepalive sur le port ${PORT}`);
-});
-
-const PING_URL = RENDER_URL || 'https://nsfw-bot-p9u8.onrender.com';
-setInterval(async () => {
-  try {
-    await fetch(`${PING_URL}/health`);
-    console.log('💓 Self-ping OK →', PING_URL);
-  } catch (e) {
-    console.warn('⚠️ Self-ping failed:', e.message);
-  }
-}, 2 * 60 * 1000);
-
-// ══════════════════════════════════════════════
-//  LOGIN
-// ══════════════════════════════════════════════
-client.login(TOKEN);
+      

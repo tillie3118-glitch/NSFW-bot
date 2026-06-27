@@ -46,7 +46,7 @@ function getGuild(guildId) {
           { id: 'prestations', label: '• PRESTATIONS • 💋', description: 'Commande mes services ici !',       pingRoleId: null, categoryId: null },
           { id: 'questions',   label: '• QUESTIONS • 💋',   description: 'Des questions / demandes ?',        pingRoleId: null, categoryId: null },
           { id: 'partenariat', label: '• PARTENARIAT • 💋', description: 'Tu souhaites faire un partenariat avec Mayssa ?', pingRoleId: null, categoryId: null },
-          { id: 'reports',     label: '• REPORTS • 💋',     description: 'Un abus / fake à rapporté ?',       pingRoleId: null, categoryId: null },
+          { id: 'reports',     label: '• RECOMPENSE BOOST • 💋',     description: 'Pour réclamer tes récompenses de boosts',       pingRoleId: null , categoryId: null },
           { id: 'autres',      label: '• AUTRES • 💋',      description: 'Aborde un autre sujet ici !',       pingRoleId: null, categoryId: null },
         ],
       },

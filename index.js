@@ -6,17 +6,21 @@
 //  + Rôles multiples par sélection ticket
 //  + Catégorie de ticket réglable par ID brut
 //  + FIX : nettoyage automatique des "tickets fantômes"
-//          (salon supprimé manuellement sans passer par /close ou /delete)
-//  + AJOUT : /setcategoryboost (salon des remerciements de boost)
-//          + /setcategorywelcome (salon des messages de bienvenue)
-//  + FIX (mise à jour) : auto-récupération des tickets "orphelins"
-//          (le salon existe toujours sur Discord mais le bot avait perdu
-//          la référence, typiquement après un redémarrage sans disque
-//          persistant côté hébergeur) → /close, /delete etc. refonctionnent
-//          automatiquement, et /fixtickets peut forcer la réparation à tout moment.
-//  + SIMPLIFICATION : une seule catégorie de ticket pour tout le serveur,
-//          réglable via la seule commande /setticketcategory (sélecteur Discord,
-//          ne montre que des catégories, donc plus d'erreur d'ID).
+//  + AJOUT : /setcategoryboost + /setcategorywelcome
+//  + FIX : auto-récupération des tickets "orphelins"
+//  + SIMPLIFICATION : une seule catégorie de ticket (/setticketcategory)
+//  ──────────────────────────────────────────────────────────────
+//  MISE À JOUR v2 :
+//  + &bl      : raison TOUJOURS affichée (même si posée par un Sys+)
+//             + message de confirmation "a bien été blacklisté"
+//             + logs envoyés dans sanctions + advanced
+//  + &unbl    : logs envoyés dans sanctions + advanced
+//  + &blinfo  : raison et modérateur toujours visibles (plus de masquage)
+//  + &clear [@user/ID] <count> : supprime des messages (max 500)
+//               &clear 50          → 50 msgs du salon
+//               &clear @user 50    → 50 msgs de @user dans le salon
+//             + logs envoyés dans sanctions + advanced
+//  + Persistance renforcée : sauvegarde sur exception non gérée / crash
 // ============================================================
 
 const {
@@ -41,17 +45,13 @@ const RENDER_URL       = process.env.RENDER_EXTERNAL_URL;
 
 const OWNER_IDS_DEFAULT = ['207283656203436042', '685679698054742017'];
 
-// Préfixe utilisé pour TOUS les salons de ticket créés par le bot.
-// Sert aussi à reconnaître/retrouver un salon de ticket (voir syncTickets()).
 const TICKET_PREFIX = '💋・';
 
-// Fichier de sauvegarde persistante (hardcodé, pas besoin de DB externe)
 const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, 'data', 'guildData.json');
 
-// ⚠️ Vérif rapide au démarrage — aide à diagnostiquer la perte du badge slash "/"
 if (!TOKEN) console.error('❌ TOKEN manquant — vérifie les variables d\'environnement Render.');
-if (!process.env.CLIENT_ID) console.warn('⚠️ CLIENT_ID non défini en variable d\'environnement Render, utilisation de la valeur par défaut codée en dur (risque de désync si ce n\'est pas le bon bot).');
-if (!process.env.GUILD_ID) console.warn('⚠️ GUILD_ID non défini en variable d\'environnement Render, utilisation de la valeur par défaut codée en dur (risque de désync si ce n\'est pas le bon serveur).');
+if (!process.env.CLIENT_ID) console.warn('⚠️ CLIENT_ID non défini en variable d\'environnement Render, utilisation de la valeur par défaut codée en dur.');
+if (!process.env.GUILD_ID) console.warn('⚠️ GUILD_ID non défini en variable d\'environnement Render, utilisation de la valeur par défaut codée en dur.');
 
 // ──────────────────────────────────────────────
 //  STATE en mémoire
@@ -70,16 +70,14 @@ function getGuild(guildId) {
           { id: 'prestations', label: '• PRESTATIONS • 💋', description: 'Commande mes services ici !',       pingRoleId: null, extraRoleIds: [] },
           { id: 'questions',   label: '• QUESTIONS • 💋',   description: 'Des questions / demandes ?',        pingRoleId: null, extraRoleIds: [] },
           { id: 'partenariat', label: '• PARTENARIAT • 💋', description: 'Tu souhaites faire un partenariat avec Mayssa ?', pingRoleId: null, extraRoleIds: [] },
-          { id: 'reports',     label: '• RECOMPENSE BOOSTS • 💋',     description: 'Pour réclamer tes récompenses de boosts',       pingRoleId: null , extraRoleIds: [] },
+          { id: 'reports',     label: '• RECOMPENSE BOOSTS • 💋', description: 'Pour réclamer tes récompenses de boosts', pingRoleId: null, extraRoleIds: [] },
           { id: 'autres',      label: '• AUTRES • 💋',      description: 'Aborde un autre sujet ici !',       pingRoleId: null, extraRoleIds: [] },
         ],
-        // ── CATÉGORIE UNIQUE pour tous les tickets, quelle que soit la sélection ──
-        // Réglable uniquement via /setticketcategory (voir plus bas).
         defaultCategoryId: null,
       },
 
       tickets: {},
-      ticketViewRoleId: null, // rôle qui peut voir TOUS les tickets en plus du créateur
+      ticketViewRoleId: null,
 
       logsChannels: {
         tickets:    null,
@@ -118,29 +116,23 @@ function getGuild(guildId) {
       maintenance: false,
       channelBackup: {},
 
-      // ── INVITE LOGGER ──
       inviteLogger: {
         joinChannelId: null,
         leaveChannelId: null,
-        inviteCache: {},     // code -> { uses, inviterId, inviterTag }
+        inviteCache: {},
       },
 
-      // ── ROLEMEMBER ──
-      autoRoleId: null,    // rôle auto aux nouveaux arrivants
+      autoRoleId: null,
 
-      // ── BLACKLIST (&bl) ──
-      blacklist: {},        // userId -> { reason, byId, byTag, bySysPlus, timestamp }
-      blRoleId: null,       // rôle autorisé (en plus de ownerbot) à utiliser &bl
+      blacklist: {},
+      blRoleId: null,
 
-      // ── LOCKNAME (,lockname) ──
-      lockedNames: {},      // userId -> nom verrouillé
+      lockedNames: {},
 
-      // ── DOG (/dog) ──
-      dogged: {},           // userId -> { masterId, originalNick }
-      dogRoleId: null,      // rôle autorisé (en plus de ownerbot) à utiliser /dog
+      dogged: {},
+      dogRoleId: null,
 
-      // ── DM (/dm) ──
-      dmRoleId: null,       // rôle autorisé (en plus de ownerbot) à utiliser /dm
+      dmRoleId: null,
     };
   }
   return guildData[guildId];
@@ -165,13 +157,10 @@ function loadData() {
       const parsed = JSON.parse(raw);
       for (const [gId, data] of Object.entries(parsed)) {
         guildData[gId] = data;
-        // Migration : s'assurer que defaultCategoryId existe sur les anciennes sauvegardes
         if (!guildData[gId].panel) guildData[gId].panel = {};
         if (guildData[gId].panel.defaultCategoryId === undefined) {
           guildData[gId].panel.defaultCategoryId = null;
         }
-        // Migration : on supprime l'ancien système de catégorie PAR SÉLECTION
-        // (remplacé par une seule catégorie globale, réglée via /setticketcategory)
         if (Array.isArray(guildData[gId].panel.selections)) {
           for (const sel of guildData[gId].panel.selections) {
             if (sel && typeof sel === 'object') delete sel.categoryId;
@@ -187,16 +176,28 @@ function loadData() {
   }
 }
 
-// On restaure tout de suite, avant même la connexion à Discord
+// Restauration immédiate au démarrage
 loadData();
+
+// ── Sauvegarde sur crash / exception non gérée ──
+// Permet de ne pas perdre l'état en cas d'erreur inattendue.
+process.on('uncaughtException', (err) => {
+  console.error('💥 Exception non gérée :', err.message, err.stack);
+  saveData();
+  // On ne quitte PAS : le bot tente de rester en ligne
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('💥 Promesse rejetée non gérée :', reason);
+  saveData();
+});
 
 // Sauvegarde automatique toutes les 30 secondes
 setInterval(saveData, 30 * 1000);
 
-// Sauvegarde à l'arrêt (redeploy, crash géré, Ctrl+C...)
-process.on('SIGINT', () => { saveData(); process.exit(0); });
+// Sauvegarde à l'arrêt propre (redeploy, Ctrl+C…)
+process.on('SIGINT',  () => { saveData(); process.exit(0); });
 process.on('SIGTERM', () => { saveData(); process.exit(0); });
-process.on('exit', () => { saveData(); });
+process.on('exit',    () => { saveData(); });
 
 // ──────────────────────────────────────────────
 //  CLIENT DISCORD
@@ -343,25 +344,13 @@ async function cacheInvites(guild) {
 }
 
 // ──────────────────────────────────────────────
-//  SYNC TICKETS — Nettoyage + Auto-récupération
-//  • Nettoie les références de tickets dont le salon a été supprimé
-//    manuellement (sans passer par /close ou /delete) → "tickets fantômes".
-//  • Retrouve les salons de ticket qui existent TOUJOURS sur Discord mais
-//    dont la référence a été perdue côté bot → "tickets orphelins".
-//    C'est typiquement ce qui arrive après un redémarrage / redeploiement
-//    si l'hébergeur (ex: Render sans disque persistant) n'a pas conservé
-//    le fichier de sauvegarde. Sans ce correctif, /close, /delete, /add,
-//    /remove répondent "Ce salon n'est pas un ticket" même si le salon
-//    EST bien un ticket toujours ouvert.
-//    Appelée automatiquement au démarrage du bot, et manuellement via
-//    la commande /fixtickets.
+//  SYNC TICKETS — Nettoyage fantômes + auto-récupération orphelins
 // ──────────────────────────────────────────────
 async function syncTickets(guild) {
   const d = getGuild(guild.id);
   let cleaned = 0;
   let recovered = 0;
 
-  // 1) Tickets fantômes : référence en mémoire, salon introuvable sur Discord
   for (const chId of Object.keys(d.tickets)) {
     if (!guild.channels.cache.has(chId)) {
       delete d.tickets[chId];
@@ -369,16 +358,13 @@ async function syncTickets(guild) {
     }
   }
 
-  // 2) Tickets orphelins : salon présent sur Discord, référence absente côté bot
   const ticketChannels = guild.channels.cache.filter(
     c => c.type === ChannelType.GuildText && c.name && c.name.startsWith(TICKET_PREFIX)
   );
 
   for (const [chId, ch] of ticketChannels) {
-    if (d.tickets[chId]) continue; // déjà connu, rien à faire
+    if (d.tickets[chId]) continue;
 
-    // Retrouve la sélection d'origine via le préfixe du nom du salon
-    // (format de création : 💋・<id-selection>-<pseudo>)
     let selectionId = null;
     for (const sel of d.panel.selections) {
       if (ch.name.startsWith(`${TICKET_PREFIX}${sel.id}-`)) {
@@ -387,8 +373,6 @@ async function syncTickets(guild) {
       }
     }
 
-    // Retrouve le créateur du ticket via la première permission "membre"
-    // posée sur le salon (celle du créateur est ajoutée en premier à la création)
     let userId = null;
     try {
       for (const [, overwrite] of ch.permissionOverwrites.cache) {
@@ -438,7 +422,7 @@ function buildPanelComponents(guildId) {
 }
 
 // ──────────────────────────────────────────────
-//  COMPTE À REBOURS DE FERMETURE (1 seul embed édité)
+//  COMPTE À REBOURS DE FERMETURE
 // ──────────────────────────────────────────────
 async function sendCloseCountdown(channel) {
   const makeEmbed = (n) => new EmbedBuilder()
@@ -489,10 +473,7 @@ const commands = [
     .addStringOption(o => o.setName('id').setDescription('ID de la sélection').setRequired(true)),
   new SlashCommandBuilder().setName('panel').setDescription('Envoyer le panel ticket dans ce salon'),
 
-  // ── CATÉGORIE DES TICKETS (UNE SEULE COMMANDE POUR TOUT LE SERVEUR) ──
-  // Choisis ici le salon/catégorie où TOUS les tickets s'ouvriront,
-  // quelle que soit la sélection choisie par le membre. Le sélecteur Discord
-  // ne propose QUE des catégories, donc impossible de se tromper d'ID.
+  // ── CATÉGORIE DES TICKETS ──
   new SlashCommandBuilder().setName('setticketcategory')
     .setDescription('Définir LA catégorie où s\'ouvriront tous les tickets (sélecteur Discord)')
     .addChannelOption(o => o.setName('categorie').setDescription('Catégorie Discord').setRequired(true).addChannelTypes(ChannelType.GuildCategory)),
@@ -522,10 +503,7 @@ const commands = [
     .addChannelOption(o => o.setName('salon').setDescription('Salon').setRequired(true)),
   new SlashCommandBuilder().setName('setuplogs').setDescription('Créer automatiquement tous les salons de logs'),
 
-  // ── RACCOURCIS SALONS BOOST / WELCOME ──
-  // Raccourcis simples et dédiés, en plus de /setlogschannel et /invitelogger,
-  // pour définir rapidement le salon des remerciements de boost et le salon
-  // des messages de bienvenue, sans avoir à choisir un "type" ou une "action".
+  // ── RACCOURCIS BOOST / WELCOME ──
   new SlashCommandBuilder().setName('setcategoryboost')
     .setDescription('Définir le salon où sont envoyés les remerciements de boost')
     .addChannelOption(o => o.setName('salon').setDescription('Salon des remerciements de boost').setRequired(true)),
@@ -584,7 +562,7 @@ const commands = [
       ))
     .addChannelOption(o => o.setName('salon').setDescription('Salon (pour setjoin / setleave)')),
 
-  // ── RÔLES SPÉCIAUX (BL / DOG / DM / TICKET) ──
+  // ── RÔLES SPÉCIAUX ──
   new SlashCommandBuilder().setName('setblrole').setDescription('Définir le rôle autorisé à utiliser &bl (en plus de ownerbot)')
     .addRoleOption(o => o.setName('role').setDescription('Rôle').setRequired(true)),
   new SlashCommandBuilder().setName('setdogrole').setDescription('Définir le rôle autorisé à utiliser /dog (en plus de ownerbot)')
@@ -594,16 +572,11 @@ const commands = [
   new SlashCommandBuilder().setName('setticketrole').setDescription('Définir le rôle qui peut voir TOUS les tickets')
     .addRoleOption(o => o.setName('role').setDescription('Rôle').setRequired(true)),
 
-  // ── FIX TICKETS (FANTÔMES + ORPHELINS) ──
-  // À utiliser si un ticket ne répond plus normalement aux commandes de gestion
-  // (ex: "Ce salon n'est pas un ticket" après un redémarrage du bot), ou si un
-  // salon de ticket a été supprimé manuellement et bloque encore un membre.
-  // Cette commande répare les deux cas en une seule fois.
+  // ── FIX TICKETS ──
   new SlashCommandBuilder().setName('fixtickets')
     .setDescription('Réparer les tickets : nettoie fantômes + retrouve orphelins post-redémarrage'),
 
-
-  // ── DOG (laisse) ──
+  // ── DOG ──
   new SlashCommandBuilder().setName('dog').setDescription('Mettre un membre en laisse')
     .addUserOption(o => o.setName('user').setDescription('Membre cible').setRequired(true)),
   new SlashCommandBuilder().setName('undog').setDescription('Retirer la laisse d\'un membre')
@@ -621,7 +594,7 @@ const commands = [
 ].map(c => c.toJSON());
 
 // ──────────────────────────────────────────────
-//  REGISTER SLASH COMMANDS (guild only, pas de global)
+//  REGISTER SLASH COMMANDS
 // ──────────────────────────────────────────────
 async function registerCommands() {
   const rest = new REST({ version: '10' }).setToken(TOKEN);
@@ -651,10 +624,6 @@ client.once(Events.ClientReady, async () => {
     try { await cacheInvites(guild); } catch {}
     backupChannels(guild);
 
-    // ── FIX : SYNCHRONISATION DES TICKETS AU DÉMARRAGE ──
-    // Nettoie les tickets fantômes (salon supprimé manuellement) ET retrouve
-    // les tickets orphelins (salon toujours là, référence perdue côté bot —
-    // typiquement après un redémarrage si la sauvegarde disque n'a pas survécu).
     try {
       const { cleaned, recovered } = await syncTickets(guild);
       if (cleaned > 0) console.log(`🧹 ${cleaned} ticket(s) fantôme(s) nettoyé(s) au démarrage sur ${guild.name}.`);
@@ -687,8 +656,7 @@ client.on(Events.InviteDelete, async invite => {
 });
 
 // ──────────────────────────────────────────────
-//  PHRASES DE BIENVENUE — 30 phrases coquines & tentantes
-//  (style taquin/suggestif, rien d'explicite)
+//  PHRASES DE BIENVENUE
 // ──────────────────────────────────────────────
 const WELCOME_LINES = [
   "t'as sonné à la bonne porte chéri(e) 💋",
@@ -724,24 +692,21 @@ const WELCOME_LINES = [
 ];
 
 // ══════════════════════════════════════════════
-//  GUILDMEMBERADD — Blacklist + Auto-rôle + Invite Logger
+//  GUILDMEMBERADD
 // ══════════════════════════════════════════════
 client.on(Events.GuildMemberAdd, async member => {
   const gId = member.guild.id;
   const d = getGuild(gId);
 
-  // ── BLACKLIST : re-ban automatique ──
   if (d.blacklist[member.id]) {
     try { await member.ban({ reason: 'Blacklist active — re-ban automatique' }); } catch {}
     return;
   }
 
-  // ── AUTO-RÔLE ──
   if (d.autoRoleId) {
     try { await member.roles.add(d.autoRoleId); } catch {}
   }
 
-  // ── ANTI-RAID ──
   if (d.antiRaid.enabled) {
     const now = Date.now();
     d.antiRaid.joinTimestamps.push(now);
@@ -811,7 +776,6 @@ client.on(Events.GuildMemberAdd, async member => {
     }
   }
 
-  // ── INVITE LOGGER : arrivée ──
   const il = d.inviteLogger;
   if (!il.joinChannelId) return;
 
@@ -867,7 +831,7 @@ client.on(Events.GuildMemberAdd, async member => {
 });
 
 // ══════════════════════════════════════════════
-//  GUILDMEMBERREMOVE — Invite Logger départ
+//  GUILDMEMBERREMOVE
 // ══════════════════════════════════════════════
 client.on(Events.GuildMemberRemove, async member => {
   const gId = member.guild.id;
@@ -925,8 +889,6 @@ client.on(Events.InteractionCreate, async interaction => {
     const existing = Object.entries(d.tickets).find(([, t]) => t.userId === interaction.user.id);
     if (existing) {
       const ch = interaction.guild.channels.cache.get(existing[0]);
-      // ── FIX : si le salon n'existe plus réellement (supprimé manuellement),
-      // on nettoie la référence fantôme au lieu de bloquer l'utilisateur. ──
       if (!ch) {
         delete d.tickets[existing[0]];
         saveData();
@@ -935,15 +897,10 @@ client.on(Events.InteractionCreate, async interaction => {
       }
     }
 
-    // ── CATÉGORIE DU TICKET ──
-    // Une seule catégorie possible pour TOUS les tickets, réglée via /setticketcategory.
-    // Si aucune catégorie n'est définie → le salon est créé à la racine du serveur.
     let parentId = d.panel.defaultCategoryId || null;
     if (parentId) {
       const parentCat = interaction.guild.channels.cache.get(parentId);
       if (!parentCat || parentCat.type !== ChannelType.GuildCategory) {
-        // La catégorie enregistrée n'existe plus (supprimée, ou donnée invalide) :
-        // on ouvre le ticket à la racine plutôt que de bloquer complètement la création.
         console.warn(`⚠️ Catégorie de ticket introuvable (${parentId}) sur ${interaction.guild.name}, ticket créé à la racine.`);
         parentId = null;
       }
@@ -959,9 +916,6 @@ client.on(Events.InteractionCreate, async interaction => {
           PermissionFlagsBits.SendMessages,
           PermissionFlagsBits.ReadMessageHistory,
         ],
-        // Le créateur du ticket peut VOIR et ENVOYER des messages,
-        // mais N'A PAS accès aux commandes slash de gestion du ticket
-        // (close, delete, rename, add, remove) car celles-ci vérifient isManager().
       },
     ];
     if (sel.pingRoleId) {
@@ -1048,7 +1002,6 @@ client.on(Events.InteractionCreate, async interaction => {
     if (cId === 'ticket_close') {
       const ticket = d.tickets[interaction.channelId];
       if (!ticket) return interaction.reply({ content: '❌ Ce salon n\'est pas un ticket.', ephemeral: true });
-      // Seul un manager peut fermer via le bouton (pas la victime)
       if (!isManager(gId, interaction.member)) {
         return interaction.reply({ content: '❌ Permission insuffisante.', ephemeral: true });
       }
@@ -1198,29 +1151,23 @@ client.on(Events.InteractionCreate, async interaction => {
     return interaction.reply({ content: '✅ Panel envoyé !', ephemeral: true });
   }
 
-  // ════ CATÉGORIE DES TICKETS (UNE SEULE COMMANDE) ════
+  // ════ CATÉGORIE DES TICKETS ════
   if (commandName === 'setticketcategory') {
     if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
     const cat = interaction.options.getChannel('categorie');
     if (cat.type !== ChannelType.GuildCategory) {
-      return interaction.reply({ content: '❌ Ce n\'est pas une catégorie Discord. Sélectionne une vraie catégorie.', ephemeral: true });
+      return interaction.reply({ content: '❌ Ce n\'est pas une catégorie Discord.', ephemeral: true });
     }
     d.panel.defaultCategoryId = cat.id;
     saveData();
-    return interaction.reply({
-      content: `✅ Tous les tickets s'ouvriront désormais dans : **${cat.name}**`,
-      ephemeral: true,
-    });
+    return interaction.reply({ content: `✅ Tous les tickets s'ouvriront désormais dans : **${cat.name}**`, ephemeral: true });
   }
 
   if (commandName === 'removeticketcategory') {
     if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
     d.panel.defaultCategoryId = null;
     saveData();
-    return interaction.reply({
-      content: '✅ Catégorie des tickets supprimée. Les tickets s\'ouvriront désormais à la racine du serveur.',
-      ephemeral: true,
-    });
+    return interaction.reply({ content: '✅ Catégorie des tickets supprimée. Les tickets s\'ouvriront désormais à la racine du serveur.', ephemeral: true });
   }
 
   if (commandName === 'ticketcategorystatus') {
@@ -1228,13 +1175,9 @@ client.on(Events.InteractionCreate, async interaction => {
     const defaultCat = d.panel.defaultCategoryId
       ? (interaction.guild.channels.cache.get(d.panel.defaultCategoryId)?.name || `ID: ${d.panel.defaultCategoryId}`)
       : '`Aucune (tickets à la racine)`';
-
     const embed = new EmbedBuilder()
       .setTitle('📂 Catégorie des Tickets')
-      .setDescription(
-        `**Catégorie actuelle :** ${defaultCat}\n\n` +
-        `*Tous les tickets s'ouvrent dans cette catégorie, quelle que soit la sélection choisie.*`
-      )
+      .setDescription(`**Catégorie actuelle :** ${defaultCat}\n\n*Tous les tickets s'ouvrent dans cette catégorie, quelle que soit la sélection choisie.*`)
       .setColor(0xff69b4)
       .setFooter({ text: 'Mayssa • Call me Mayssa 💋' });
     return interaction.reply({ embeds: [embed], ephemeral: true });
@@ -1368,7 +1311,7 @@ client.on(Events.InteractionCreate, async interaction => {
     }
   }
 
-  // ════ RACCOURCIS SALONS BOOST / WELCOME ════
+  // ════ RACCOURCIS BOOST / WELCOME ════
   if (commandName === 'setcategoryboost') {
     if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
     const salon = interaction.options.getChannel('salon');
@@ -1645,7 +1588,7 @@ client.on(Events.InteractionCreate, async interaction => {
     return interaction.reply({ content: `✅ Rôle pouvant voir TOUS les tickets : ${role}`, ephemeral: true });
   }
 
-  // ════ FIX TICKETS (FANTÔMES + ORPHELINS) ════
+  // ════ FIX TICKETS ════
   if (commandName === 'fixtickets') {
     if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
     const { cleaned, recovered } = await syncTickets(interaction.guild);
@@ -1656,7 +1599,7 @@ client.on(Events.InteractionCreate, async interaction => {
     return interaction.reply({ content: parts.join('\n'), ephemeral: true });
   }
 
-  // ════ DOG (laisse) ════
+  // ════ DOG ════
   if (commandName === 'dog') {
     if (!canUseDog(gId, interaction.member)) return interaction.reply({ content: '❌ Permission insuffisante.', ephemeral: true });
     const targetUser = interaction.options.getUser('user');
@@ -1731,46 +1674,108 @@ client.on(Events.InteractionCreate, async interaction => {
 //  BLACKLIST + LOCKNAME — Commandes texte (préfixes & et ,)
 // ══════════════════════════════════════════════
 
+// ── &bl @user/ID [raison] ──
+// • Envoie un DM avec la raison à la cible
+// • Blackliste + Ban du serveur immédiatement
+// • Affiche un message de confirmation dans le salon
+// • Envoie un log dans sanctions + advanced
+// • La raison est TOUJOURS stockée et visible dans &blinfo,
+//   même si c'est un Sys+ qui pose la BL.
 async function cmdBl(message, d, gId, member, args) {
   const id = extractIdFromArg(args[0]);
-  if (!id) return message.reply({ content: 'Veuillez fournir l\'ID/@user.' });
+  if (!id) return message.reply({ content: '❌ Veuillez fournir l\'ID ou la mention (@user).' });
   if (isOwner(gId, id)) return message.reply({ content: '❌ Impossible de blacklister un Sys+.' });
   if (d.blacklist[id]) return message.reply({ content: '⚠️ Ce membre est déjà blacklisté.' });
+
   if (!isOwner(gId, member.id)) {
     const targetMemberCheck = await message.guild.members.fetch(id).catch(() => null);
     if (targetMemberCheck && targetMemberCheck.roles.highest.position >= member.roles.highest.position) {
       return message.reply({ content: '❌ Tu ne peux pas blacklister un membre avec un rôle égal ou supérieur au tien.' });
     }
   }
+
   let target;
-  try { target = await client.users.fetch(id); } catch { return message.reply({ content: '❌ Utilisateur introuvable.' }); }
+  try { target = await client.users.fetch(id); } catch {
+    return message.reply({ content: '❌ Utilisateur introuvable.' });
+  }
+
   const reason = args.slice(1).join(' ') || null;
-  try { await target.send({ content: `Tu as été blacklisté de **${message.guild.name}** raison: ${reason || ''}` }); } catch {}
-  d.blacklist[id] = { reason, byId: member.id, byTag: member.user.tag, bySysPlus: isOwner(gId, member.id), timestamp: Date.now() };
+
+  // DM à la cible — raison toujours envoyée
+  try {
+    await target.send({
+      content:
+        `Tu as été blacklisté de **${message.guild.name}**.\n` +
+        (reason ? `**Raison :** ${reason}` : '*Aucune raison précisée.*'),
+    });
+  } catch {}
+
+  // Enregistrement dans la blacklist (raison toujours stockée)
+  d.blacklist[id] = {
+    reason,
+    byId: member.id,
+    byTag: member.user.tag,
+    bySysPlus: isOwner(gId, member.id),
+    timestamp: Date.now(),
+  };
   saveData();
+
+  // Ban immédiat du serveur
   try { await message.guild.members.ban(id, { reason: reason || 'Blacklist' }); } catch {}
-  return message.reply({ content: `✅ <@${id}> a été blacklisté${reason ? ` pour : ${reason}` : ''}.` });
+
+  // Confirmation dans le salon
+  await message.reply({
+    content: `✅ <@${id}> a bien été blacklisté${reason ? ` — raison : **${reason}**` : ''}.`,
+  });
+
+  // Logs sanctions + advanced
+  const logEmbed = new EmbedBuilder()
+    .setTitle('📋 Membre Blacklisté')
+    .setDescription(
+      `**Cible :** <@${id}> (${id})\n` +
+      `**Modérateur :** ${message.author} (${message.author.id})\n` +
+      `**Raison :** ${reason || '*Aucune*'}`
+    )
+    .setColor(0x2b0a2b)
+    .setTimestamp();
+  await sendLog(message.guild, 'sanctions', logEmbed);
+  await sendLog(message.guild, 'advanced', logEmbed);
 }
 
+// ── &unbl @user/ID ──
 async function cmdUnbl(message, d, gId, member, args) {
   const id = extractIdFromArg(args[0]);
-  if (!id) return message.reply({ content: 'Veuillez fournir l\'ID/@user.' });
+  if (!id) return message.reply({ content: '❌ Veuillez fournir l\'ID ou la mention (@user).' });
   if (!d.blacklist[id]) return message.reply({ content: '❌ Ce membre n\'est pas blacklisté.' });
   delete d.blacklist[id];
   saveData();
   try { await message.guild.members.unban(id); } catch {}
+
+  // Logs sanctions + advanced
+  const logEmbed = new EmbedBuilder()
+    .setTitle('✅ Blacklist Levée')
+    .setDescription(
+      `**Cible :** <@${id}> (${id})\n` +
+      `**Modérateur :** ${message.author} (${message.author.id})`
+    )
+    .setColor(0x00ff99).setTimestamp();
+  await sendLog(message.guild, 'sanctions', logEmbed);
+  await sendLog(message.guild, 'advanced', logEmbed);
+
   return message.reply({ content: `✅ <@${id}> n'est plus blacklisté.` });
 }
 
+// ── &blist ──
 async function cmdBlist(message, d) {
   const entries = Object.entries(d.blacklist);
   const list = entries.length
-    ? entries.map(([id, info]) => `• <@${id}> (${id}) — ${info.bySysPlus ? '🔒 raison cachée (Sys+)' : (info.reason || 'Aucune raison')}`).join('\n')
+    ? entries.map(([id, info]) => `• <@${id}> (${id}) — ${info.reason || '*Aucune raison*'}`).join('\n')
     : '*Aucun utilisateur blacklisté.*';
   const embed = new EmbedBuilder().setTitle('📋 Liste des blacklists').setDescription(list).setColor(0x2b0a2b);
   return message.reply({ embeds: [embed] });
 }
 
+// ── &unblalls ──
 async function cmdUnblalls(message, d) {
   const ids = Object.keys(d.blacklist);
   for (const id of ids) { try { await message.guild.members.unban(id); } catch {} }
@@ -1779,25 +1784,149 @@ async function cmdUnblalls(message, d) {
   return message.reply({ content: `✅ **${ids.length}** membre(s) retiré(s) de la blacklist.` });
 }
 
+// ── &blinfo @user/ID ──
+// La raison et le modérateur sont TOUJOURS affichés,
+// même si la BL a été posée par un Sys+.
 async function cmdBlinfo(message, d, gId, member, args) {
   const id = extractIdFromArg(args[0]);
-  if (!id) return message.reply({ content: 'Veuillez fournir l\'ID/@user.' });
+  if (!id) return message.reply({ content: '❌ Veuillez fournir l\'ID ou la mention (@user).' });
   const info = d.blacklist[id];
   if (!info) return message.reply({ content: '❌ Ce membre n\'est pas blacklisté.' });
+
   const dateStr = new Date(info.timestamp).toLocaleString('fr-FR');
-  const motifLine = info.bySysPlus ? '🔒 Caché (Sys+)' : (info.reason || '*Aucune*');
-  const modLine = info.bySysPlus ? '❌ Par Sys+' : `<@${info.byId}>`;
-  const modIdLine = info.bySysPlus ? '*Caché*' : info.byId;
+  const motifLine = info.reason || '*Aucune*';
+  const modLine   = `<@${info.byId}>`;
+  const modIdLine = info.byId || '*Inconnu*';
+
   const desc =
     '╭───────────────\n│ 📄 Rapport BL INFO\n╰───────────────\n\n' +
     '👤 Utilisateur\n' + `• Pseudo : <@${id}>\n• Identifiant : ${id}\n\n` +
     '📝 Motif :\n' + `${motifLine}\n\n` +
     '👮 Traitement\n' + `• Modérateur : ${modLine}\n• Identifiant : ${modIdLine}\n\n` +
     '📅 Date\n' + ` • ${dateStr}`;
+
   const embed = new EmbedBuilder().setDescription(desc).setColor(0x2b0a2b);
   return message.reply({ embeds: [embed] });
 }
 
+// ── &clear [@user/ID] <count> ──
+// Supprime jusqu'à <count> messages (max 500) dans le salon courant.
+// Si @user/ID est précisé : filtre uniquement ses messages.
+// Sinon : supprime les derniers messages du salon.
+// Seuls les messages de moins de 14 jours peuvent être supprimés en masse
+// (limitation Discord : bulkDelete ne fonctionne pas sur les vieux msgs).
+async function cmdClear(message, d, gId, member, args) {
+  if (args.length === 0) {
+    return message.reply({
+      content:
+        '❌ Utilisation :\n' +
+        '• `&clear 50` — supprime 50 messages du salon\n' +
+        '• `&clear @user 50` — supprime 50 messages de @user dans ce salon\n' +
+        '*(max 500, messages < 14 jours uniquement)*',
+    });
+  }
+
+  let targetId = null;
+  let count    = null;
+
+  // Détecte si le 1er argument est un @user / ID numérique
+  const possibleId = extractIdFromArg(args[0]);
+  if (possibleId) {
+    targetId = possibleId;
+    count = parseInt(args[1]);
+  } else {
+    count = parseInt(args[0]);
+  }
+
+  if (isNaN(count) || count < 1) {
+    return message.reply({
+      content: '❌ Nombre de messages invalide (entre 1 et 500).',
+    });
+  }
+  count = Math.min(count, 500);
+
+  // Supprime le message de commande lui-même avant de commencer
+  await message.delete().catch(() => {});
+
+  let totalDeleted  = 0;
+  let lastMessageId = undefined;
+  const TWO_WEEKS   = 14 * 24 * 60 * 60 * 1000;
+
+  try {
+    while (totalDeleted < count) {
+      const fetchOptions = { limit: 100 };
+      if (lastMessageId) fetchOptions.before = lastMessageId;
+
+      const fetched = await message.channel.messages.fetch(fetchOptions);
+      if (fetched.size === 0) break;
+
+      // Curseur pour l'itération suivante
+      lastMessageId = fetched.last().id;
+
+      const now = Date.now();
+
+      // Discord n'accepte bulkDelete que sur les messages < 14 jours
+      let candidates = fetched.filter(m => now - m.createdTimestamp < TWO_WEEKS);
+
+      // Filtre optionnel par utilisateur
+      if (targetId) {
+        candidates = candidates.filter(m => m.author.id === targetId);
+      }
+
+      // Si aucun candidat dans ce lot, continue vers des messages plus anciens
+      if (candidates.size === 0) {
+        if (fetched.size < 100) break; // Plus de messages à parcourir
+        continue;
+      }
+
+      const remaining = count - totalDeleted;
+      const toDelete  = [...candidates.values()].slice(0, remaining);
+      if (toDelete.length === 0) break;
+
+      if (toDelete.length === 1) {
+        // bulkDelete requiert ≥ 2 messages — suppression unitaire si 1 seul
+        await toDelete[0].delete().catch(() => {});
+        totalDeleted += 1;
+      } else {
+        const result = await message.channel.bulkDelete(toDelete, true);
+        totalDeleted += result.size;
+      }
+
+      // Si le lot était incomplet, on a tout parcouru
+      if (fetched.size < 100) break;
+
+      // Petite pause pour respecter le rate-limit Discord
+      await new Promise(r => setTimeout(r, 1000));
+    }
+
+    // Message de confirmation (auto-supprimé après 5s)
+    const confirmMsg = await message.channel.send({
+      content: `🗑️ **${totalDeleted}** message(s)${targetId ? ` de <@${targetId}>` : ''} supprimé(s) par ${message.author}.`,
+    });
+    setTimeout(() => confirmMsg.delete().catch(() => {}), 5000);
+
+    // Logs sanctions + advanced
+    const logEmbed = new EmbedBuilder()
+      .setTitle('🗑️ Clear de Messages')
+      .setDescription(
+        `**Modérateur :** ${message.author} (${message.author.id})\n` +
+        `**Salon :** ${message.channel}\n` +
+        (targetId
+          ? `**Cible :** <@${targetId}>\n`
+          : `**Cible :** Tous les messages du salon\n`) +
+        `**Messages supprimés :** ${totalDeleted}`
+      )
+      .setColor(0xff6600)
+      .setTimestamp();
+    await sendLog(message.guild, 'sanctions', logEmbed);
+    await sendLog(message.guild, 'advanced', logEmbed);
+
+  } catch (e) {
+    await message.channel.send({ content: `❌ Erreur lors du clear : ${e.message}` }).catch(() => {});
+  }
+}
+
+// ── LOCKNAME ──
 async function cmdLockname(message, d, gId, member, args) {
   const id = extractIdFromArg(args[0]);
   if (!id) return message.reply({ content: 'Veuillez fournir l\'ID/@user.' });
@@ -1836,23 +1965,28 @@ async function cmdLocknamelist(message, d) {
   return message.reply({ embeds: [embed] });
 }
 
+// ── Routeur commandes &... ──
+// Commandes disponibles : &bl, &unbl, &blist, &unblalls, &blinfo, &clear
+// Toutes requièrent canUseBl() (ownerbot OU rôle blRoleId).
 async function handleBlCommands(message, d, gId, member) {
   const args = message.content.trim().split(/\s+/);
   const cmd = args[0].slice(1).toLowerCase();
-  const validCommands = ['bl', 'unbl', 'blist', 'unblalls', 'blinfo'];
+  const validCommands = ['bl', 'unbl', 'blist', 'unblalls', 'blinfo', 'clear'];
   if (!validCommands.includes(cmd)) return false;
   if (!canUseBl(gId, member)) {
     await message.reply({ content: '❌ Tu n\'as pas la permission d\'utiliser cette commande.' });
     return true;
   }
-  if (cmd === 'bl') await cmdBl(message, d, gId, member, args.slice(1));
-  else if (cmd === 'unbl') await cmdUnbl(message, d, gId, member, args.slice(1));
-  else if (cmd === 'blist') await cmdBlist(message, d);
-  else if (cmd === 'unblalls') await cmdUnblalls(message, d);
-  else if (cmd === 'blinfo') await cmdBlinfo(message, d, gId, member, args.slice(1));
+  if (cmd === 'bl')       await cmdBl(message, d, gId, member, args.slice(1));
+  else if (cmd === 'unbl')      await cmdUnbl(message, d, gId, member, args.slice(1));
+  else if (cmd === 'blist')     await cmdBlist(message, d);
+  else if (cmd === 'unblalls')  await cmdUnblalls(message, d);
+  else if (cmd === 'blinfo')    await cmdBlinfo(message, d, gId, member, args.slice(1));
+  else if (cmd === 'clear')     await cmdClear(message, d, gId, member, args.slice(1));
   return true;
 }
 
+// ── Routeur commandes ,... ──
 async function handleLockCommands(message, d, gId, member) {
   const args = message.content.trim().split(/\s+/);
   const cmd = args[0].slice(1).toLowerCase();
@@ -1862,10 +1996,10 @@ async function handleLockCommands(message, d, gId, member) {
     await message.reply({ content: '❌ Owner bot uniquement.' });
     return true;
   }
-  if (cmd === 'lockname') await cmdLockname(message, d, gId, member, args.slice(1));
-  else if (cmd === 'unlockname') await cmdUnlockname(message, d, args.slice(1));
+  if (cmd === 'lockname')         await cmdLockname(message, d, gId, member, args.slice(1));
+  else if (cmd === 'unlockname')  await cmdUnlockname(message, d, args.slice(1));
   else if (cmd === 'unlocknamealls') await cmdUnlocknamealls(message, d);
-  else if (cmd === 'locknamelist') await cmdLocknamelist(message, d);
+  else if (cmd === 'locknamelist')   await cmdLocknamelist(message, d);
   return true;
 }
 
@@ -1980,11 +2114,7 @@ client.on(Events.ChannelDelete, async channel => {
   const gId = channel.guild.id;
   const d = getGuild(gId);
 
-  // ── FIX : NETTOYAGE TICKET FANTÔME ──
-  // Si le salon supprimé (manuellement ou autrement) correspond à un ticket
-  // suivi dans d.tickets, on retire la référence immédiatement. Sans ce bloc,
-  // l'utilisateur reste bloqué pour toujours avec "tu as déjà un ticket ouvert"
-  // alors que le salon n'existe plus (c'était exactement le bug rencontré).
+  // Nettoyage ticket fantôme si le salon correspondait à un ticket
   if (d.tickets[channel.id]) {
     delete d.tickets[channel.id];
     saveData();

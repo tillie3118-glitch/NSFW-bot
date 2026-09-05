@@ -39,8 +39,8 @@ const path = require('path');
 //  CONFIG — Variables d'environnement Render
 // ──────────────────────────────────────────────
 const TOKEN            = process.env.TOKEN;
-const CLIENT_ID        = process.env.CLIENT_ID || '1519233968749416498';
-const GUILD_ID         = process.env.GUILD_ID  || '1515771169138147448';
+const CLIENT_ID        = process.env.CLIENT_ID || '1545903970222870620';
+const GUILD_ID         = process.env.GUILD_ID  || '1545903970222870620';
 const RENDER_URL       = process.env.RENDER_EXTERNAL_URL;
 
 const OWNER_IDS_DEFAULT = ['207283656203436042', '685679698054742017'];

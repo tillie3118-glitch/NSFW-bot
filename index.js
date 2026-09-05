@@ -39,8 +39,8 @@ const path = require('path');
 //  CONFIG — Variables d'environnement Render
 // ──────────────────────────────────────────────
 const TOKEN            = process.env.TOKEN;
-const CLIENT_ID        = process.env.CLIENT_ID || '1545903970222870620';
-const GUILD_ID         = process.env.GUILD_ID  || '1545903970222870620';
+const CLIENT_ID        = process.env.CLIENT_ID || '1519233968749416498';
+const GUILD_ID         = process.env.GUILD_ID  || '1515771169138147448';
 const RENDER_URL       = process.env.RENDER_EXTERNAL_URL;
 
 const OWNER_IDS_DEFAULT = ['207283656203436042', '685679698054742017'];
@@ -50,8 +50,8 @@ const TICKET_PREFIX = '💋・';
 const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, 'data', 'guildData.json');
 
 if (!TOKEN) console.error('❌ TOKEN manquant — vérifie les variables d\'environnement Render.');
-if (!process.env.CLIENT_ID) console.warn('⚠ CLIENT_ID non défini en variable d\'environnement Render, utilisation de la valeur par défaut codée en dur.');
-if (!process.env.GUILD_ID) console.warn('⚠ GUILD_ID non défini en variable d\'environnement Render, utilisation de la valeur par défaut codée en dur.');
+if (!process.env.CLIENT_ID) console.warn('⚠️ CLIENT_ID non défini en variable d\'environnement Render, utilisation de la valeur par défaut codée en dur.');
+if (!process.env.GUILD_ID) console.warn('⚠️ GUILD_ID non défini en variable d\'environnement Render, utilisation de la valeur par défaut codée en dur.');
 
 // ──────────────────────────────────────────────
 //  STATE en mémoire
@@ -65,11 +65,11 @@ function getGuild(guildId) {
 
       panel: {
         title: '🦋 • SUPPORT TICKET • 🦋',
-        description: '♡ ••••• ♡\n\n*• Tu as envie de commander une prestation de Mayssa ? Une question ? Ou autre ?*\n\n💋 **Ouvre un ticket parmis les options suivantes :**',
+        description: '♡ ••••• ♡\n\n*• Tu as envie de commander une prestation de Lyx ? Une question ? Ou autre ?*\n\n💋 **Ouvre un ticket parmis les options suivantes :**',
         selections: [
           { id: 'prestations', label: '• PRESTATIONS • 💋', description: 'Commande mes services ici !',       pingRoleId: null, extraRoleIds: [] },
           { id: 'questions',   label: '• QUESTIONS • 💋',   description: 'Des questions / demandes ?',        pingRoleId: null, extraRoleIds: [] },
-          { id: 'partenariat', label: '• PARTENARIAT • 💋', description: 'Tu souhaites faire un partenariat avec Mayssa ?', pingRoleId: null, extraRoleIds: [] },
+          { id: 'partenariat', label: '• PARTENARIAT • 💋', description: 'Tu souhaites faire un partenariat avec Lyx ?', pingRoleId: null, extraRoleIds: [] },
           { id: 'reports',     label: '• RECOMPENSE BOOSTS • 💋', description: 'Pour réclamer tes récompenses de boosts', pingRoleId: null, extraRoleIds: [] },
           { id: 'autres',      label: '• AUTRES • 💋',      description: 'Aborde un autre sujet ici !',       pingRoleId: null, extraRoleIds: [] },
         ],
@@ -281,13 +281,13 @@ async function ensureLogCategory(guild) {
   const d = getGuild(guild.id);
   const LOG_CHANNELS = [
     { key: 'tickets',    name: '🎫・logs-tickets'    },
-    { key: 'antiraid',   name: '🛡・logs-antiraid'   },
+    { key: 'antiraid',   name: '🛡️・logs-antiraid'   },
     { key: 'antispam',   name: '🚫・logs-antispam'   },
     { key: 'antibot',    name: '🤖・logs-antibot'    },
     { key: 'protection', name: '🔨・logs-protection' },
     { key: 'sanctions',  name: '👮・logs-sanctions'  },
     { key: 'advanced',   name: '📜・logs-avancés'    },
-    { key: 'security',   name: '⚙・logs-sécurité'   },
+    { key: 'security',   name: '⚙️・logs-sécurité'   },
     { key: 'boost',      name: '🚀・logs-boost'      },
   ];
 
@@ -402,7 +402,7 @@ function buildPanelComponents(guildId) {
     .setTitle(d.panel.title)
     .setDescription(d.panel.description)
     .setColor(0x2b0a2b)
-    .setFooter({ text: 'Mayssa • Call me Mayssa 💋' });
+    .setFooter({ text: 'Lyx • Call me Lyx 💋' });
 
   const options = d.panel.selections.map(s => ({
     label: s.label,
@@ -616,7 +616,7 @@ async function registerCommands() {
 // ══════════════════════════════════════════════
 client.once(Events.ClientReady, async () => {
   console.log(`✅ Connecté en tant que ${client.user.tag}`);
-  client.user.setPresence({ activities: [{ name: '💋 Mayssa • Call me Mayssa' }], status: 'dnd' });
+  client.user.setPresence({ activities: [{ name: '💋 Lyx • Call me Lyx' }], status: 'dnd' });
   await registerCommands();
 
   for (const guild of client.guilds.cache.values()) {
@@ -627,7 +627,7 @@ client.once(Events.ClientReady, async () => {
     try {
       const { cleaned, recovered } = await syncTickets(guild);
       if (cleaned > 0) console.log(`🧹 ${cleaned} ticket(s) fantôme(s) nettoyé(s) au démarrage sur ${guild.name}.`);
-      if (recovered > 0) console.log(`♻ ${recovered} ticket(s) retrouvé(s) et re-synchronisé(s) au démarrage sur ${guild.name}.`);
+      if (recovered > 0) console.log(`♻️ ${recovered} ticket(s) retrouvé(s) et re-synchronisé(s) au démarrage sur ${guild.name}.`);
     } catch (e) {
       console.error('❌ Erreur de synchronisation des tickets:', e.message);
     }
@@ -672,7 +672,7 @@ const WELCOME_LINES = [
   "j'espère que t'es là pour rester chéri(e) 💋",
   "tu rentres dans mon monde maintenant, bonne chance 😈",
   "une belle surprise ce soir 🌙✨",
-  "bienvenue, j'ai hâte de découvrir qui tu es 👁",
+  "bienvenue, j'ai hâte de découvrir qui tu es 👁️",
   "t'es nouveau(elle) ? parfait, j'adore les nouveautés 💋",
   "encore un(e) qui a pas pu résister... bienvenue 😉",
   "tu vas voir, ici on s'ennuie jamais avec moi 🔥",
@@ -760,13 +760,13 @@ client.on(Events.GuildMemberAdd, async member => {
           d.antiRaid.quarantinedUsers.push(member.id);
           try { await member.timeout(600000, 'Anti-raid : arrivée massive'); } catch {}
           const logEmbed = new EmbedBuilder()
-            .setTitle('🛡 ANTI-RAID : Quarantaine')
+            .setTitle('🛡️ ANTI-RAID : Quarantaine')
             .setDescription(`**Membre :** ${member.user.tag}\n**${recent} membres** ont rejoint récemment.`)
             .setColor(0xff8800).setTimestamp();
           await sendLog(member.guild, 'antiraid', logEmbed);
         } else {
           const logEmbed = new EmbedBuilder()
-            .setTitle('⚠ ANTI-RAID : Alerte Joins')
+            .setTitle('⚠️ ANTI-RAID : Alerte Joins')
             .setDescription(`**${recent} membres** ont rejoint en ${threshold.window / 1000}s.`)
             .setColor(0xffff00).setTimestamp();
           await sendLog(member.guild, 'antiraid', logEmbed);
@@ -824,7 +824,7 @@ client.on(Events.GuildMemberAdd, async member => {
     )
     .setColor(0xff69b4)
     .setThumbnail(member.user.displayAvatarURL({ dynamic: true }))
-    .setFooter({ text: '💋 Mayssa • Bienvenue !' })
+    .setFooter({ text: '💋 Lyx • Bienvenue !' })
     .setTimestamp();
 
   try { await joinCh.send({ embeds: [joinEmbed] }); } catch {}
@@ -865,7 +865,7 @@ client.on(Events.GuildMemberRemove, async member => {
     )
     .setColor(0x555555)
     .setThumbnail(member.user.displayAvatarURL({ dynamic: true }))
-    .setFooter({ text: '💋 Mayssa • Au revoir 🖤' })
+    .setFooter({ text: '💋 Lyx • Au revoir 🖤' })
     .setTimestamp();
 
   try { await leaveCh.send({ embeds: [leaveEmbed] }); } catch {}
@@ -901,7 +901,7 @@ client.on(Events.InteractionCreate, async interaction => {
     if (parentId) {
       const parentCat = interaction.guild.channels.cache.get(parentId);
       if (!parentCat || parentCat.type !== ChannelType.GuildCategory) {
-        console.warn(`⚠ Catégorie de ticket introuvable (${parentId}) sur ${interaction.guild.name}, ticket créé à la racine.`);
+        console.warn(`⚠️ Catégorie de ticket introuvable (${parentId}) sur ${interaction.guild.name}, ticket créé à la racine.`);
         parentId = null;
       }
     }
@@ -949,7 +949,7 @@ client.on(Events.InteractionCreate, async interaction => {
       .setTitle(`💋 Ticket — ${sel.label}`)
       .setDescription(`Bienvenue ${interaction.user} !\n\n*${sel.description}*\n\nUn membre de l'équipe va te répondre bientôt. 💋`)
       .setColor(0x2b0a2b)
-      .setFooter({ text: 'Mayssa • Call me Mayssa 💋' })
+      .setFooter({ text: 'Lyx • Call me Lyx 💋' })
       .setTimestamp();
 
     const claimRow = new ActionRowBuilder().addComponents(
@@ -982,7 +982,7 @@ client.on(Events.InteractionCreate, async interaction => {
       if (cId === 'ticket_claim') {
         ticket.claimedBy = interaction.user.id;
         const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId('ticket_unclaim').setLabel('↩ Unclaim').setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId('ticket_unclaim').setLabel('↩️ Unclaim').setStyle(ButtonStyle.Secondary),
           new ButtonBuilder().setCustomId('ticket_close').setLabel('🔒 Fermer').setStyle(ButtonStyle.Danger),
         );
         await interaction.update({ components: [row] });
@@ -994,7 +994,7 @@ client.on(Events.InteractionCreate, async interaction => {
           new ButtonBuilder().setCustomId('ticket_close').setLabel('🔒 Fermer').setStyle(ButtonStyle.Danger),
         );
         await interaction.update({ components: [row] });
-        await interaction.channel.send({ content: `↩ **${interaction.user}** a unclaim ce ticket.` });
+        await interaction.channel.send({ content: `↩️ **${interaction.user}** a unclaim ce ticket.` });
       }
       return;
     }
@@ -1039,7 +1039,7 @@ client.on(Events.InteractionCreate, async interaction => {
   if (commandName === 'addown') {
     if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
     const user = interaction.options.getUser('user');
-    if (d.ownerIds.includes(user.id)) return interaction.reply({ content: '⚠ Déjà owner.', ephemeral: true });
+    if (d.ownerIds.includes(user.id)) return interaction.reply({ content: '⚠️ Déjà owner.', ephemeral: true });
     d.ownerIds.push(user.id);
     saveData();
     return interaction.reply({ content: `✅ ${user} ajouté comme owner bot.`, ephemeral: true });
@@ -1081,7 +1081,7 @@ client.on(Events.InteractionCreate, async interaction => {
     const id = interaction.options.getString('id');
     const label = interaction.options.getString('label');
     const desc = interaction.options.getString('description');
-    if (d.panel.selections.find(s => s.id === id)) return interaction.reply({ content: '⚠ ID déjà existant.', ephemeral: true });
+    if (d.panel.selections.find(s => s.id === id)) return interaction.reply({ content: '⚠️ ID déjà existant.', ephemeral: true });
     if (d.panel.selections.length >= 25) return interaction.reply({ content: '❌ Maximum 25 options.', ephemeral: true });
     d.panel.selections.push({ id, label, description: desc, pingRoleId: null, extraRoleIds: [] });
     saveData();
@@ -1116,7 +1116,7 @@ client.on(Events.InteractionCreate, async interaction => {
     const sel = d.panel.selections.find(s => s.id === id);
     if (!sel) return interaction.reply({ content: '❌ Sélection introuvable.', ephemeral: true });
     if (!sel.extraRoleIds) sel.extraRoleIds = [];
-    if (sel.extraRoleIds.includes(role.id)) return interaction.reply({ content: '⚠ Ce rôle a déjà accès à cette sélection.', ephemeral: true });
+    if (sel.extraRoleIds.includes(role.id)) return interaction.reply({ content: '⚠️ Ce rôle a déjà accès à cette sélection.', ephemeral: true });
     sel.extraRoleIds.push(role.id);
     saveData();
     return interaction.reply({ content: `✅ ${role} a maintenant accès aux tickets **${id}**.`, ephemeral: true });
@@ -1179,7 +1179,7 @@ client.on(Events.InteractionCreate, async interaction => {
       .setTitle('📂 Catégorie des Tickets')
       .setDescription(`**Catégorie actuelle :** ${defaultCat}\n\n*Tous les tickets s'ouvrent dans cette catégorie, quelle que soit la sélection choisie.*`)
       .setColor(0xff69b4)
-      .setFooter({ text: 'Mayssa • Call me Mayssa 💋' });
+      .setFooter({ text: 'Lyx • Call me Lyx 💋' });
     return interaction.reply({ embeds: [embed], ephemeral: true });
   }
 
@@ -1238,7 +1238,7 @@ client.on(Events.InteractionCreate, async interaction => {
     if (!d.tickets[interaction.channelId]) return interaction.reply({ content: '❌ Ce salon n\'est pas un ticket.', ephemeral: true });
     try {
       const logEmbed = new EmbedBuilder()
-        .setTitle('🗑 Ticket Supprimé')
+        .setTitle('🗑️ Ticket Supprimé')
         .setDescription(`**Salon :** ${interaction.channel.name}\n**Supprimé par :** ${interaction.user}`)
         .setColor(0xff0000).setTimestamp();
       await sendLog(interaction.guild, 'tickets', logEmbed);
@@ -1267,7 +1267,7 @@ client.on(Events.InteractionCreate, async interaction => {
   if (commandName === 'addmanagerole') {
     if (!isOwner(gId, interaction.user.id)) return interaction.reply({ content: '❌ Owner bot uniquement.', ephemeral: true });
     const role = interaction.options.getRole('role');
-    if (d.managerRoles.includes(role.id)) return interaction.reply({ content: '⚠ Déjà manager.', ephemeral: true });
+    if (d.managerRoles.includes(role.id)) return interaction.reply({ content: '⚠️ Déjà manager.', ephemeral: true });
     d.managerRoles.push(role.id);
     saveData();
     return interaction.reply({ content: `✅ ${role} ajouté comme rôle manager.`, ephemeral: true });
@@ -1398,7 +1398,7 @@ client.on(Events.InteractionCreate, async interaction => {
     const action = interaction.options.getString('action');
     d.maintenance = (action === 'on');
     client.user.setPresence({
-      activities: [{ name: action === 'on' ? '🔧 Maintenance...' : '💋 Mayssa • Call me Mayssa' }],
+      activities: [{ name: action === 'on' ? '🔧 Maintenance...' : '💋 Lyx • Call me Lyx' }],
       status: action === 'on' ? 'idle' : 'dnd',
     });
     saveData();
@@ -1421,7 +1421,7 @@ client.on(Events.InteractionCreate, async interaction => {
       return interaction.reply({ content: `✅ ${user} retiré de la whitelist.`, ephemeral: true });
     } else {
       const list = d.whitelist.map(id => `<@${id}>`).join('\n') || '*Vide*';
-      const embed = new EmbedBuilder().setTitle('🛡 Whitelist Admin').setDescription(list).setColor(0x00ff99);
+      const embed = new EmbedBuilder().setTitle('🛡️ Whitelist Admin').setDescription(list).setColor(0x00ff99);
       return interaction.reply({ embeds: [embed], ephemeral: true });
     }
   }
@@ -1432,7 +1432,7 @@ client.on(Events.InteractionCreate, async interaction => {
     const message = interaction.options.getString('message').replace(/\\n/g, '\n');
     const role = interaction.options.getRole('role');
     const embed = new EmbedBuilder()
-      .setTitle('📜 Règlement — Mayssa')
+      .setTitle('📜 Règlement — Lyx')
       .setDescription(message)
       .setColor(0x2b0a2b)
       .setFooter({ text: 'Clique sur le bouton ci-dessous pour valider et obtenir l\'accès 💋' })
@@ -1471,7 +1471,7 @@ client.on(Events.InteractionCreate, async interaction => {
       return interaction.editReply({ content: `❌ Erreur lors du fetch des membres : ${e.message}` });
     }
     return interaction.editReply({
-      content: `✅ Rôle ${role} attribué à **${success}** membre(s).\n${fail > 0 ? `⚠ Échec pour **${fail}** membre(s).\n` : ''}💋 Ce rôle sera aussi donné automatiquement aux nouveaux arrivants.`,
+      content: `✅ Rôle ${role} attribué à **${success}** membre(s).\n${fail > 0 ? `⚠️ Échec pour **${fail}** membre(s).\n` : ''}💋 Ce rôle sera aussi donné automatiquement aux nouveaux arrivants.`,
     });
   }
 
@@ -1496,7 +1496,7 @@ client.on(Events.InteractionCreate, async interaction => {
         const embed = new EmbedBuilder()
           .setDescription(messageText)
           .setColor(color)
-          .setFooter({ text: '💋 Mayssa' })
+          .setFooter({ text: '💋 Lyx' })
           .setTimestamp();
         if (titre) embed.setTitle(titre);
         await salon.send({ embeds: [embed] });
@@ -1550,7 +1550,7 @@ client.on(Events.InteractionCreate, async interaction => {
           `**Invites en cache :** ${cacheSize}`
         )
         .setColor(0xff69b4)
-        .setFooter({ text: 'Mayssa • Call me Mayssa 💋' });
+        .setFooter({ text: 'Lyx • Call me Lyx 💋' });
       return interaction.reply({ embeds: [embed], ephemeral: true });
     }
   }
@@ -1594,7 +1594,7 @@ client.on(Events.InteractionCreate, async interaction => {
     const { cleaned, recovered } = await syncTickets(interaction.guild);
     const parts = [];
     if (cleaned > 0) parts.push(`🧹 **${cleaned}** ticket(s) fantôme(s) nettoyé(s) (salon supprimé manuellement).`);
-    if (recovered > 0) parts.push(`♻ **${recovered}** ticket(s) retrouvé(s) et re-synchronisé(s) (référence perdue, ex: après un redémarrage du bot).`);
+    if (recovered > 0) parts.push(`♻️ **${recovered}** ticket(s) retrouvé(s) et re-synchronisé(s) (référence perdue, ex: après un redémarrage du bot).`);
     if (parts.length === 0) parts.push('✅ Tout est déjà propre, aucun ticket fantôme ou orphelin trouvé !');
     return interaction.reply({ content: parts.join('\n'), ephemeral: true });
   }
@@ -1685,7 +1685,7 @@ async function cmdBl(message, d, gId, member, args) {
   const id = extractIdFromArg(args[0]);
   if (!id) return message.reply({ content: '❌ Veuillez fournir l\'ID ou la mention (@user).' });
   if (isOwner(gId, id)) return message.reply({ content: '❌ Impossible de blacklister un Sys+.' });
-  if (d.blacklist[id]) return message.reply({ content: '⚠ Ce membre est déjà blacklisté.' });
+  if (d.blacklist[id]) return message.reply({ content: '⚠️ Ce membre est déjà blacklisté.' });
 
   if (!isOwner(gId, member.id)) {
     const targetMemberCheck = await message.guild.members.fetch(id).catch(() => null);
@@ -1901,13 +1901,13 @@ async function cmdClear(message, d, gId, member, args) {
 
     // Message de confirmation (auto-supprimé après 5s)
     const confirmMsg = await message.channel.send({
-      content: `🗑 **${totalDeleted}** message(s)${targetId ? ` de <@${targetId}>` : ''} supprimé(s) par ${message.author}.`,
+      content: `🗑️ **${totalDeleted}** message(s)${targetId ? ` de <@${targetId}>` : ''} supprimé(s) par ${message.author}.`,
     });
     setTimeout(() => confirmMsg.delete().catch(() => {}), 5000);
 
     // Logs sanctions + advanced
     const logEmbed = new EmbedBuilder()
-      .setTitle('🗑 Clear de Messages')
+      .setTitle('🗑️ Clear de Messages')
       .setDescription(
         `**Modérateur :** ${message.author} (${message.author.id})\n` +
         `**Salon :** ${message.channel}\n` +
@@ -2158,7 +2158,7 @@ client.on(Events.ChannelCreate, async channel => {
   d._channelCreateTimestamps.push(now);
   if (d._channelCreateTimestamps.length >= 5) {
     const logEmbed = new EmbedBuilder()
-      .setTitle('⚠ Création Massive de Salons')
+      .setTitle('⚠️ Création Massive de Salons')
       .setDescription(`**${d._channelCreateTimestamps.length}** salons créés en 10 secondes !`)
       .setColor(0xff8800).setTimestamp();
     await sendLog(channel.guild, 'protection', logEmbed);
@@ -2211,7 +2211,7 @@ client.on(Events.GuildBanAdd, async ban => {
 
 client.on(Events.GuildRoleUpdate, async (oldRole, newRole) => {
   const logEmbed = new EmbedBuilder()
-    .setTitle('✏ Rôle Modifié')
+    .setTitle('✏️ Rôle Modifié')
     .setDescription(`**Rôle :** ${newRole.name}\n**Modifications :** permissions ou couleur changées`)
     .setColor(0x5865f2).setTimestamp();
   await sendLog(newRole.guild, 'advanced', logEmbed);
@@ -2288,7 +2288,7 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
 const app = express();
 
 app.get('/', (req, res) => {
-  res.send('🌸 Mayssa Bot — En ligne 💋');
+  res.send('🌸 Lyx Bot — En ligne 💋');
 });
 
 app.get('/health', (req, res) => {
@@ -2306,7 +2306,7 @@ setInterval(async () => {
     await fetch(`${PING_URL}/health`);
     console.log('💓 Self-ping OK →', PING_URL);
   } catch (e) {
-    console.warn('⚠ Self-ping failed:', e.message);
+    console.warn('⚠️ Self-ping failed:', e.message);
   }
 }, 2 * 60 * 1000);
 

@@ -351,13 +351,14 @@ async function syncTickets(guild) {
   let cleaned = 0;
   let recovered = 0;
 
-  for (const chId of Object.keys(d.tickets)) {
+    for (const chId of Object.keys(d.tickets)) {
     const ch = await guild.channels.fetch(chId).catch(() => null);
     if (!ch) {
       delete d.tickets[chId];
       cleaned++;
     }
   }
+
 
 
   const ticketChannels = guild.channels.cache.filter(
@@ -888,16 +889,31 @@ client.on(Events.InteractionCreate, async interaction => {
     const sel = d.panel.selections.find(s => s.id === selId);
     if (!sel) return interaction.editReply({ content: '❌ Option introuvable.' });
 
-        const existing = Object.entries(d.tickets).find(([, t]) => t.userId === interaction.user.id);
-    if (existing) {
-      const ch = await interaction.guild.channels.fetch(existing[0]).catch(() => null);
-      if (!ch) {
-        delete d.tickets[existing[0]];
-        saveData();
-      } else {
-        return interaction.editReply({ content: `❌ Tu as déjà un ticket ouvert : ${ch.toString()}` });
+            // Vérification EN DIRECT sur Discord (source de vérité) plutôt que sur les données
+    // sauvegardées, qui peuvent être désynchronisées (redémarrage, cache périmé, etc.)
+    await interaction.guild.channels.fetch();
+    const liveTicketChannels = interaction.guild.channels.cache.filter(
+      c => c.type === ChannelType.GuildText && c.name && c.name.startsWith(TICKET_PREFIX)
+    );
+    let existingChannel = null;
+    for (const [, ch] of liveTicketChannels) {
+      const overwrite = ch.permissionOverwrites.cache.get(interaction.user.id);
+      if (overwrite && overwrite.type === OverwriteType.Member) {
+        existingChannel = ch;
+        break;
       }
     }
+    if (existingChannel) {
+      d.tickets[existingChannel.id] = d.tickets[existingChannel.id] || { userId: interaction.user.id, claimedBy: null, selectionId: null };
+      saveData();
+      return interaction.editReply({ content: `❌ Tu as déjà un ticket ouvert : ${existingChannel.toString()}` });
+    } else {
+      for (const [chId, t] of Object.entries(d.tickets)) {
+        if (t.userId === interaction.user.id) delete d.tickets[chId];
+      }
+      saveData();
+    }
+
 
 
     let parentId = d.panel.defaultCategoryId || null;

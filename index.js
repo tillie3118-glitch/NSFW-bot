@@ -352,11 +352,13 @@ async function syncTickets(guild) {
   let recovered = 0;
 
   for (const chId of Object.keys(d.tickets)) {
-    if (!guild.channels.cache.has(chId)) {
+    const ch = await guild.channels.fetch(chId).catch(() => null);
+    if (!ch) {
       delete d.tickets[chId];
       cleaned++;
     }
   }
+
 
   const ticketChannels = guild.channels.cache.filter(
     c => c.type === ChannelType.GuildText && c.name && c.name.startsWith(TICKET_PREFIX)
@@ -886,9 +888,9 @@ client.on(Events.InteractionCreate, async interaction => {
     const sel = d.panel.selections.find(s => s.id === selId);
     if (!sel) return interaction.editReply({ content: '❌ Option introuvable.' });
 
-    const existing = Object.entries(d.tickets).find(([, t]) => t.userId === interaction.user.id);
+        const existing = Object.entries(d.tickets).find(([, t]) => t.userId === interaction.user.id);
     if (existing) {
-      const ch = interaction.guild.channels.cache.get(existing[0]);
+      const ch = await interaction.guild.channels.fetch(existing[0]).catch(() => null);
       if (!ch) {
         delete d.tickets[existing[0]];
         saveData();
@@ -896,6 +898,7 @@ client.on(Events.InteractionCreate, async interaction => {
         return interaction.editReply({ content: `❌ Tu as déjà un ticket ouvert : ${ch.toString()}` });
       }
     }
+
 
     let parentId = d.panel.defaultCategoryId || null;
     if (parentId) {

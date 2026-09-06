@@ -999,7 +999,7 @@ client.on(Events.InteractionCreate, async interaction => {
       return;
     }
 
-    if (cId === 'ticket_close') {
+        if (cId === 'ticket_close') {
       const ticket = d.tickets[interaction.channelId];
       if (!ticket) return interaction.reply({ content: '❌ Ce salon n\'est pas un ticket.', ephemeral: true });
       if (!isManager(gId, interaction.member)) {
@@ -1007,17 +1007,24 @@ client.on(Events.InteractionCreate, async interaction => {
       }
       await interaction.reply({ content: '🔒 Fermeture en cours...', ephemeral: true }).catch(() => {});
       await sendCloseCountdown(interaction.channel);
+      const channelId = interaction.channelId;
+      const channelName = interaction.channel.name;
       try {
+        await interaction.channel.delete();
+        delete d.tickets[channelId];
+        saveData();
         const logEmbed = new EmbedBuilder()
           .setTitle('🔒 Ticket Fermé')
-          .setDescription(`**Salon :** ${interaction.channel.name}\n**Fermé par :** ${interaction.user}`)
+          .setDescription(`**Salon :** ${channelName}\n**Fermé par :** ${interaction.user}`)
           .setColor(0xff4444).setTimestamp();
         await sendLog(interaction.guild, 'tickets', logEmbed);
-        delete d.tickets[interaction.channelId];
-        await interaction.channel.delete();
-      } catch {}
+      } catch (e) {
+        console.error('❌ Erreur suppression ticket (bouton close):', e.message);
+        await interaction.channel.send({ content: `⚠️ Échec de suppression du salon (${e.message}). Vérifie que le bot a la permission **Gérer les salons**.` }).catch(() => {});
+      }
       return;
     }
+
 
     if (cId.startsWith('rule_accept_')) {
       const roleId = cId.replace('rule_accept_', '');
@@ -1215,40 +1222,53 @@ client.on(Events.InteractionCreate, async interaction => {
     return;
   }
 
-  if (commandName === 'close') {
+    if (commandName === 'close') {
     if (!isManager(gId, interaction.member)) return interaction.reply({ content: '❌ Permission insuffisante.', ephemeral: true });
     const ticket = d.tickets[interaction.channelId];
     if (!ticket) return interaction.reply({ content: '❌ Ce salon n\'est pas un ticket.', ephemeral: true });
     await interaction.reply({ content: '🔒 Fermeture en cours...', ephemeral: true }).catch(() => {});
     await sendCloseCountdown(interaction.channel);
+    const channelId = interaction.channelId;
+    const channelName = interaction.channel.name;
     try {
+      await interaction.channel.delete();
+      delete d.tickets[channelId];
+      saveData();
       const logEmbed = new EmbedBuilder()
         .setTitle('🔒 Ticket Fermé')
-        .setDescription(`**Salon :** ${interaction.channel.name}\n**Fermé par :** ${interaction.user}`)
+        .setDescription(`**Salon :** ${channelName}\n**Fermé par :** ${interaction.user}`)
         .setColor(0xff4444).setTimestamp();
       await sendLog(interaction.guild, 'tickets', logEmbed);
-      delete d.tickets[interaction.channelId];
-      await interaction.channel.delete();
-    } catch {}
-    return;
-  }
-
-  if (commandName === 'delete') {
-    if (!isManager(gId, interaction.member)) return interaction.reply({ content: '❌ Permission insuffisante.', ephemeral: true });
-    if (!d.tickets[interaction.channelId]) return interaction.reply({ content: '❌ Ce salon n\'est pas un ticket.', ephemeral: true });
-    try {
-      const logEmbed = new EmbedBuilder()
-        .setTitle('🗑️ Ticket Supprimé')
-        .setDescription(`**Salon :** ${interaction.channel.name}\n**Supprimé par :** ${interaction.user}`)
-        .setColor(0xff0000).setTimestamp();
-      await sendLog(interaction.guild, 'tickets', logEmbed);
-      delete d.tickets[interaction.channelId];
-      await interaction.channel.delete();
-    } catch {
-      await interaction.reply({ content: '❌ Impossible de supprimer ce salon.', ephemeral: true });
+    } catch (e) {
+      console.error('❌ Erreur suppression ticket (/close):', e.message);
+      await interaction.channel.send({ content: `⚠️ Échec de suppression du salon (${e.message}). Vérifie que le bot a la permission **Gérer les salons**.` }).catch(() => {});
     }
     return;
   }
+
+
+    if (commandName === 'delete') {
+    if (!isManager(gId, interaction.member)) return interaction.reply({ content: '❌ Permission insuffisante.', ephemeral: true });
+    if (!d.tickets[interaction.channelId]) return interaction.reply({ content: '❌ Ce salon n\'est pas un ticket.', ephemeral: true });
+    const channelId = interaction.channelId;
+    const channelName = interaction.channel.name;
+    try {
+      await interaction.channel.delete();
+      delete d.tickets[channelId];
+      saveData();
+      const logEmbed = new EmbedBuilder()
+        .setTitle('🗑️ Ticket Supprimé')
+        .setDescription(`**Salon :** ${channelName}\n**Supprimé par :** ${interaction.user}`)
+        .setColor(0xff0000).setTimestamp();
+      await sendLog(interaction.guild, 'tickets', logEmbed);
+    } catch (e) {
+      console.error('❌ Erreur suppression ticket (/delete):', e.message);
+      await interaction.reply({ content: `❌ Impossible de supprimer ce salon : ${e.message}`, ephemeral: true }).catch(() => {});
+    }
+    return;
+  }
+
+    
 
   if (commandName === 'rename') {
     if (!isManager(gId, interaction.member)) return interaction.reply({ content: '❌ Permission insuffisante.', ephemeral: true });
